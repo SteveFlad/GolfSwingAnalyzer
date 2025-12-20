@@ -54,21 +54,41 @@ class SerialCapture:
         
     def _read_loop(self):
         """Main reading loop (runs in separate thread)"""
+        line_count = 0
         while self.running:
             try:
-                if self.serial_conn.in_waiting > 0:
-                    line = self.serial_conn.readline().decode('utf-8', errors='ignore').strip()
-                    
-                    if line:
-                        data = self._parse_line(line)
-                        if data and self.callback:
-                            self.callback(data)
+                if self.serial_conn and self.serial_conn.is_open:
+                    if self.serial_conn.in_waiting > 0:
+                        line = self.serial_conn.readline().decode('utf-8', errors='ignore').strip()
+                        
+                        if line:
+                            line_count += 1
+                            # Print first few lines and periodic debug info
+                            if line_count <= 10 or line_count % 50 == 0:
+                                print(f"[DEBUG] Received line {line_count}: {line}")
+                            
+                            data = self._parse_line(line)
+                            if data and self.callback:
+                                self.callback(data)
+                            elif line and not data:
+                                # Log unparsed lines occasionally for debugging
+                                if line_count % 100 == 0:
+                                    print(f"[DEBUG] Could not parse line: {line}")
+                    else:
+                        # Small delay when no data available to prevent CPU spinning
+                        time.sleep(0.01)
+                else:
+                    print("Serial connection lost")
+                    break
                             
             except serial.SerialException as e:
                 print(f"Serial error: {e}")
+                self.running = False
                 break
             except Exception as e:
                 print(f"Error reading data: {e}")
+                # Don't break on general exceptions, just log and continue
+                time.sleep(0.01)
                 
         print("Read loop ended")
         

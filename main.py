@@ -39,7 +39,8 @@ class GolfSwingAnalyzer:
         self.port_combo.grid(row=0, column=1, padx=5, pady=5)
         
         ttk.Button(control_frame, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, padx=5, pady=5)
-        ttk.Button(control_frame, text="Connect", command=self.connect_serial).grid(row=0, column=3, padx=5, pady=5)
+        self.connect_btn = ttk.Button(control_frame, text="Connect", command=self.toggle_connection)
+        self.connect_btn.grid(row=0, column=3, padx=5, pady=5)
         
         # Capture Controls
         ttk.Label(control_frame, text="Capture:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
@@ -89,6 +90,13 @@ class GolfSwingAnalyzer:
             self.port_combo.current(0)
         self.log_status(f"Found {len(port_list)} serial port(s)")
         
+    def toggle_connection(self):
+        """Toggle connection/disconnection"""
+        if self.serial_capture and self.serial_capture.is_connected():
+            self.disconnect_serial()
+        else:
+            self.connect_serial()
+    
     def connect_serial(self):
         """Connect to selected serial port"""
         port = self.port_var.get()
@@ -100,10 +108,20 @@ class GolfSwingAnalyzer:
             self.serial_capture = SerialCapture(port, 115200, self.on_data_received)
             self.serial_capture.start()
             self.connection_label.config(text=f"Status: Connected to {port}", foreground="green")
+            self.connect_btn.config(text="Disconnect")
             self.log_status(f"Connected to {port}")
         except Exception as e:
             messagebox.showerror("Connection Error", str(e))
             self.log_status(f"Connection failed: {e}")
+    
+    def disconnect_serial(self):
+        """Disconnect from serial port"""
+        if self.serial_capture:
+            self.serial_capture.stop()
+            self.serial_capture = None
+            self.connection_label.config(text="Status: Not Connected", foreground="red")
+            self.connect_btn.config(text="Connect")
+            self.log_status("Disconnected")
             
     def start_capture(self):
         """Start capturing data"""
@@ -132,13 +150,22 @@ class GolfSwingAnalyzer:
         
     def on_data_received(self, data):
         """Callback when new data is received from serial"""
+        # Always log incoming data (even when not capturing) to verify data is being received
+        if not hasattr(self, '_data_received_count'):
+            self._data_received_count = 0
+        self._data_received_count += 1
+        
+        # Log periodically to show data is coming in
+        if self._data_received_count % 20 == 1:
+            self.log_status(f"Receiving data: Q0:{data['q0']:.3f} Q1:{data['q1']:.3f} Q2:{data['q2']:.3f} Q3:{data['q3']:.3f}")
+        
         if self.is_capturing:
             self.current_data.append(data)
             self.update_data_count()
             
             # Log to status (limit frequency)
             if len(self.current_data) % 10 == 0:
-                self.log_status(f"Q0:{data['q0']:.3f} Q1:{data['q1']:.3f} Q2:{data['q2']:.3f} Q3:{data['q3']:.3f}")
+                self.log_status(f"Captured: Q0:{data['q0']:.3f} Q1:{data['q1']:.3f} Q2:{data['q2']:.3f} Q3:{data['q3']:.3f}")
     
     def update_data_count(self):
         """Update data count display"""
