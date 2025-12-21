@@ -10,19 +10,27 @@ import re
 
 
 class SerialCapture:
-    def __init__(self, port, baudrate=115200, callback=None):
+    def __init__(self, port, baudrate=115200, callback=None, connection_lost_callback=None):
         """
         Initialize serial capture
         port: COM port name (e.g., 'COM3')
         baudrate: Serial baudrate (default 115200)
         callback: Function to call when new data is received
+        connection_lost_callback: Function to call when connection is lost
         """
         self.port = port
         self.baudrate = baudrate
         self.callback = callback
+        self.connection_lost_callback = connection_lost_callback
         self.serial_conn = None
         self.running = False
         self.thread = None
+        
+        # Connection monitoring
+        self.last_data_time = None
+        self.data_timeout = 5.0  # Seconds without data before considering connection lost
+        self.total_received = 0
+        self.total_parsed = 0
         
         # Regex pattern to match quaternion data: Q0:0.123 Q1:-0.456 Q2:0.789 Q3:-0.012
         self.pattern = re.compile(r'Q0:([-+]?\d*\.?\d+)\s+Q1:([-+]?\d*\.?\d+)\s+Q2:([-+]?\d*\.?\d+)\s+Q3:([-+]?\d*\.?\d+)')
@@ -33,6 +41,9 @@ class SerialCapture:
             self.serial_conn = serial.Serial(self.port, self.baudrate, timeout=1)
             time.sleep(2)  # Wait for connection to stabilize
             self.running = True
+            self.last_data_time = time.time()
+            self.total_received = 0
+            self.total_parsed = 0
             self.thread = threading.Thread(target=self._read_loop, daemon=True)
             self.thread.start()
             print(f"Connected to {self.port} at {self.baudrate} baud")
@@ -50,26 +61,55 @@ class SerialCapture:
             
     def is_connected(self):
         """Check if serial connection is active"""
-        return self.serial_conn is not None and self.serial_conn.is_open
+        return self.serial_conn is not None and self.serial_conn.is_open and self.running
+    
+    def get_stats(self):
+        """Get connection statistics"""
+        return {
+            'total_received': self.total_received,
+            'total_parsed': self.total_parsed,
+            'parse_rate': (self.total_parsed / self.total_received * 100) if self.total_received > 0 else 0,
+            'last_data_time': self.last_data_time,
+            'seconds_since_data': (time.time() - self.last_data_time) if self.last_data_time else None
+        }
         
     def _read_loop(self):
         """Main reading loop (runs in separate thread)"""
         line_count = 0
+        last_timeout_check = time.time()
+        
         while self.running:
             try:
+                # Check for data timeout (connection still open but no data flowing)
+                current_time = time.time()
+                if current_time - last_timeout_check > 1.0:  # Check every second
+                    last_timeout_check = current_time
+                    if self.last_data_time and (current_time - self.last_data_time) > self.data_timeout:
+                        print(f"[WARNING] No data received for {self.data_timeout} seconds")
+                        print(f"Total received: {self.total_received}, Parsed: {self.total_parsed}")
+                        if self.connection_lost_callback:
+                            self.connection_lost_callback("Data timeout - no data received")
+                        self.running = False
+                        break
+                
                 if self.serial_conn and self.serial_conn.is_open:
                     if self.serial_conn.in_waiting > 0:
                         line = self.serial_conn.readline().decode('utf-8', errors='ignore').strip()
                         
                         if line:
                             line_count += 1
+                            self.total_received += 1
+                            self.last_data_time = time.time()  # Update heartbeat
+                            
                             # Print first few lines and periodic debug info
                             if line_count <= 10 or line_count % 50 == 0:
                                 print(f"[DEBUG] Received line {line_count}: {line}")
                             
                             data = self._parse_line(line)
-                            if data and self.callback:
-                                self.callback(data)
+                            if data:
+                                self.total_parsed += 1
+                                if self.callback:
+                                    self.callback(data)
                             elif line and not data:
                                 # Log unparsed lines occasionally for debugging
                                 if line_count % 100 == 0:
@@ -78,19 +118,24 @@ class SerialCapture:
                         # Small delay when no data available to prevent CPU spinning
                         time.sleep(0.01)
                 else:
-                    print("Serial connection lost")
+                    print("[ERROR] Serial connection lost - port closed")
+                    if self.connection_lost_callback:
+                        self.connection_lost_callback("Serial port closed")
+                    self.running = False
                     break
                             
             except serial.SerialException as e:
-                print(f"Serial error: {e}")
+                print(f"[ERROR] Serial error: {e}")
+                if self.connection_lost_callback:
+                    self.connection_lost_callback(f"Serial error: {e}")
                 self.running = False
                 break
             except Exception as e:
-                print(f"Error reading data: {e}")
+                print(f"[ERROR] Error reading data: {e}")
                 # Don't break on general exceptions, just log and continue
                 time.sleep(0.01)
                 
-        print("Read loop ended")
+        print(f"Read loop ended. Total received: {self.total_received}, Parsed: {self.total_parsed}")
         
     def _parse_line(self, line):
         """
@@ -124,7 +169,7 @@ if __name__ == "__main__":
         print(f"Received: Q0={data['q0']:.3f}, Q1={data['q1']:.3f}, Q2={data['q2']:.3f}, Q3={data['q3']:.3f}")
     
     # You'll need to change this to your actual COM port
-    TEST_PORT = "COM3"
+    TEST_PORT = "COM10"
     
     print(f"Testing serial capture on {TEST_PORT}")
     print("Press Ctrl+C to stop")

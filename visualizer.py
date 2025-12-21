@@ -67,7 +67,9 @@ class SwingVisualizer:
         
     def show(self):
         """Display the 3D visualization"""
-        fig = plt.figure(figsize=(14, 10))
+        # Create maximized figure
+        fig = plt.figure()
+        fig.canvas.manager.window.state('zoomed')  # Maximize window
         
         # 3D trajectory plot
         ax1 = fig.add_subplot(2, 2, 1, projection='3d')
@@ -100,7 +102,7 @@ class SwingVisualizer:
             self.positions[:, 2],
             c=self.velocities,
             cmap='RdYlGn_r',
-            s=30,
+            s=5,
             alpha=0.6
         )
         
@@ -115,8 +117,8 @@ class SwingVisualizer:
         )
         
         # Mark start and end
-        ax.scatter(*self.positions[0], color='green', s=100, marker='o', label='Start')
-        ax.scatter(*self.positions[-1], color='red', s=100, marker='X', label='End')
+        ax.scatter(*self.positions[0], color='green', s=50, marker='o', label='Start')
+        ax.scatter(*self.positions[-1], color='red', s=50, marker='X', label='End')
         
         # Add orientation indicators at key points
         step = max(1, len(self.positions) // 20)
@@ -125,7 +127,7 @@ class SwingVisualizer:
             r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
             
             # Face direction (forward vector)
-            forward = r.apply([0, 0, 0.5])
+            forward = r.apply([0, 0, 0.125])  # 1/4 of original length
             pos = self.positions[i]
             
             ax.quiver(
@@ -180,13 +182,13 @@ class SwingVisualizer:
         for i in range(0, len(self.positions), step):
             quat = self.orientations[i]
             r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
-            forward = r.apply([0, 0, 0.3])
+            forward = r.apply([0, 0, 0.15])
             pos = self.positions[i]
             
             ax.arrow(
                 pos[0], pos[1],
                 forward[0], forward[1],
-                head_width=0.05, head_length=0.05,
+                head_width=0.025, head_length=0.025,
                 fc='red', ec='red', alpha=0.5
             )
         

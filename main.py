@@ -7,9 +7,20 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import serial.tools.list_ports
 from serial_capture import SerialCapture
+import sys
+try:
+    from ble_capture import BLECapture, scan_ble_devices_sync, BLEAK_AVAILABLE
+    BLUETOOTH_AVAILABLE = BLEAK_AVAILABLE
+    BLUETOOTH_TYPE = "BLE (Bluetooth Low Energy)" if BLEAK_AVAILABLE else None
+except ImportError:
+    BLUETOOTH_AVAILABLE = False
+    BLECapture = None
+    scan_ble_devices_sync = None
+    BLUETOOTH_TYPE = None
 from visualizer import SwingVisualizer
 import threading
 import json
+import time
 from datetime import datetime
 
 
@@ -17,11 +28,16 @@ class GolfSwingAnalyzer:
     def __init__(self, root):
         self.root = root
         self.root.title("Golf Swing Analyzer")
-        self.root.geometry("1000x800")
+        self.root.state('zoomed')  # Maximize window
         
         self.serial_capture = None
+        self.bluetooth_capture = None
+        self.connection_type = None  # 'serial' or 'bluetooth'
         self.is_capturing = False
         self.current_data = []
+        self.monitor_thread = None
+        self.monitoring = False
+        self.bt_devices = []
         
         self.setup_ui()
         self.refresh_ports()
@@ -32,25 +48,36 @@ class GolfSwingAnalyzer:
         control_frame = ttk.LabelFrame(self.root, text="Controls", padding=10)
         control_frame.pack(fill="x", padx=10, pady=5)
         
-        # Serial Port Selection
-        ttk.Label(control_frame, text="Serial Port:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.port_var = tk.StringVar()
-        self.port_combo = ttk.Combobox(control_frame, textvariable=self.port_var, width=20)
-        self.port_combo.grid(row=0, column=1, padx=5, pady=5)
+        # Connection Type Selection
+        ttk.Label(control_frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.conn_type_var = tk.StringVar(value="serial")
+        ttk.Radiobutton(control_frame, text="USB/Serial", variable=self.conn_type_var, 
+                       value="serial", command=self.update_connection_ui).grid(row=0, column=1, sticky="w", padx=5)
+        bt_radio = ttk.Radiobutton(control_frame, text="Bluetooth", variable=self.conn_type_var, 
+                       value="bluetooth", command=self.update_connection_ui)
+        bt_radio.grid(row=0, column=2, sticky="w", padx=5)
+        if not BLUETOOTH_AVAILABLE:
+            bt_radio.config(state="disabled")
         
-        ttk.Button(control_frame, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, padx=5, pady=5)
+        # Serial Port Selection
+        ttk.Label(control_frame, text="Device:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.port_var = tk.StringVar()
+        self.port_combo = ttk.Combobox(control_frame, textvariable=self.port_var, width=30)
+        self.port_combo.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        
+        ttk.Button(control_frame, text="Scan", command=self.scan_devices).grid(row=1, column=3, padx=5, pady=5)
         self.connect_btn = ttk.Button(control_frame, text="Connect", command=self.toggle_connection)
-        self.connect_btn.grid(row=0, column=3, padx=5, pady=5)
+        self.connect_btn.grid(row=1, column=4, padx=5, pady=5)
         
         # Capture Controls
-        ttk.Label(control_frame, text="Capture:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(control_frame, text="Capture:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         self.start_btn = ttk.Button(control_frame, text="Start Capture", command=self.start_capture)
-        self.start_btn.grid(row=1, column=1, padx=5, pady=5)
+        self.start_btn.grid(row=2, column=1, padx=5, pady=5)
         
         self.stop_btn = ttk.Button(control_frame, text="Stop Capture", command=self.stop_capture, state="disabled")
-        self.stop_btn.grid(row=1, column=2, padx=5, pady=5)
+        self.stop_btn.grid(row=2, column=2, padx=5, pady=5)
         
-        ttk.Button(control_frame, text="Clear Data", command=self.clear_data).grid(row=1, column=3, padx=5, pady=5)
+        ttk.Button(control_frame, text="Clear Data", command=self.clear_data).grid(row=2, column=3, padx=5, pady=5)
         
         # File Controls
         file_frame = ttk.LabelFrame(self.root, text="File Management", padding=10)
@@ -71,6 +98,14 @@ class GolfSwingAnalyzer:
         self.status_text.config(yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.status_text.yview)
         
+        # Log Bluetooth availability status
+        if not BLUETOOTH_AVAILABLE:
+            self.root.after(100, lambda: self.log_status(
+                "Note: Bluetooth support not available. Using USB/Serial only. See README_BLUETOOTH.md for details."))
+        elif BLUETOOTH_TYPE:
+            self.root.after(100, lambda: self.log_status(
+                f"Bluetooth support enabled ({BLUETOOTH_TYPE})"))
+        
         # Data Summary
         summary_frame = ttk.LabelFrame(self.root, text="Data Summary", padding=10)
         summary_frame.pack(fill="x", padx=10, pady=5)
@@ -81,6 +116,24 @@ class GolfSwingAnalyzer:
         self.connection_label = ttk.Label(summary_frame, text="Status: Not Connected", foreground="red")
         self.connection_label.pack(side="left", padx=10)
         
+    def update_connection_ui(self):
+        """Update UI based on selected connection type"""
+        conn_type = self.conn_type_var.get()
+        if conn_type == "serial":
+            self.refresh_ports()
+        else:
+            self.port_combo['values'] = [device[1] + " (" + device[0] + ")" for device in self.bt_devices]
+            if not self.bt_devices:
+                self.log_status("Click 'Scan' to discover Bluetooth devices")
+    
+    def scan_devices(self):
+        """Scan for available devices based on connection type"""
+        conn_type = self.conn_type_var.get()
+        if conn_type == "serial":
+            self.refresh_ports()
+        else:
+            self.scan_bluetooth()
+    
     def refresh_ports(self):
         """Refresh available serial ports"""
         ports = serial.tools.list_ports.comports()
@@ -89,13 +142,63 @@ class GolfSwingAnalyzer:
         if port_list:
             self.port_combo.current(0)
         self.log_status(f"Found {len(port_list)} serial port(s)")
+    
+    def scan_bluetooth(self):
+        """Scan for BLE devices"""
+        if not BLUETOOTH_AVAILABLE:
+            messagebox.showerror("Bluetooth Not Available", 
+                "BLE support requires the 'bleak' library.\n\n" +
+                "Install with: pip install bleak\n\n" +
+                "See README_BLUETOOTH.md for details.")
+            return
+        
+        self.log_status(f"Scanning for BLE devices using {BLUETOOTH_TYPE}...")
+        
+        def scan_thread():
+            try:
+                devices = scan_ble_devices_sync(timeout=5.0)
+                self.bt_devices = [(d.address, d.name) for d in devices]
+                device_list = [d.name + " (" + d.address + ")" for d in devices]
+                self.root.after(0, lambda: self.port_combo.config(values=device_list))
+                if device_list:
+                    self.root.after(0, lambda: self.port_combo.current(0))
+                self.root.after(0, lambda: self.log_status(f"Found {len(devices)} BLE device(s)"))
+            except Exception as e:
+                self.root.after(0, lambda: self.log_status(f"BLE scan error: {e}"))
+                self.root.after(0, lambda: messagebox.showerror("BLE Error", 
+                    f"Failed to scan for BLE devices.\n\n{e}"))
+        
+        threading.Thread(target=scan_thread, daemon=True).start()
         
     def toggle_connection(self):
         """Toggle connection/disconnection"""
-        if self.serial_capture and self.serial_capture.is_connected():
-            self.disconnect_serial()
+        if self.is_connected():
+            self.disconnect()
         else:
+            self.connect()
+    
+    def is_connected(self):
+        """Check if any connection is active"""
+        if self.serial_capture and self.serial_capture.is_connected():
+            return True
+        if self.bluetooth_capture and self.bluetooth_capture.is_connected():
+            return True
+        return False
+    
+    def connect(self):
+        """Connect based on selected connection type"""
+        conn_type = self.conn_type_var.get()
+        if conn_type == "serial":
             self.connect_serial()
+        else:
+            self.connect_bluetooth()
+    
+    def disconnect(self):
+        """Disconnect from current connection"""
+        if self.connection_type == "serial":
+            self.disconnect_serial()
+        elif self.connection_type == "bluetooth":
+            self.disconnect_bluetooth()
     
     def connect_serial(self):
         """Connect to selected serial port"""
@@ -105,28 +208,77 @@ class GolfSwingAnalyzer:
             return
             
         try:
-            self.serial_capture = SerialCapture(port, 115200, self.on_data_received)
+            self.serial_capture = SerialCapture(port, 115200, self.on_data_received, self.on_connection_lost)
             self.serial_capture.start()
-            self.connection_label.config(text=f"Status: Connected to {port}", foreground="green")
+            self.connection_type = "serial"
+            self.connection_label.config(text=f"Status: Connected to {port} (USB)", foreground="green")
             self.connect_btn.config(text="Disconnect")
-            self.log_status(f"Connected to {port}")
+            self.log_status(f"Connected to {port} via USB/Serial")
+            self.start_monitoring()
         except Exception as e:
             messagebox.showerror("Connection Error", str(e))
             self.log_status(f"Connection failed: {e}")
     
+    def connect_bluetooth(self):
+        """Connect to selected BLE device"""
+        if not BLUETOOTH_AVAILABLE:
+            messagebox.showerror("BLE Not Available", 
+                "BLE support requires the 'bleak' library.\nInstall with: pip install bleak")
+            return
+        
+        selected = self.port_var.get()
+        if not selected:
+            messagebox.showerror("Error", "Please select a BLE device")
+            return
+        
+        # Parse address from selection (format: "Name (XX:XX:XX:XX:XX:XX)")
+        try:
+            if '(' in selected and ')' in selected:
+                device_addr = selected.split('(')[1].split(')')[0]
+            else:
+                device_addr = selected
+            
+            self.bluetooth_capture = BLECapture(
+                device_address=device_addr,
+                data_callback=self.on_data_received,
+                connection_lost_callback=self.on_connection_lost
+            )
+            self.bluetooth_capture.start()
+            self.connection_type = "bluetooth"
+            self.connection_label.config(text=f"Status: Connected via BLE", foreground="green")
+            self.connect_btn.config(text="Disconnect")
+            self.log_status(f"Connected to {device_addr} via BLE")
+            self.start_monitoring()
+        except Exception as e:
+            messagebox.showerror("BLE Error", str(e))
+            self.log_status(f"BLE connection failed: {e}")
+    
     def disconnect_serial(self):
         """Disconnect from serial port"""
+        self.stop_monitoring()
         if self.serial_capture:
             self.serial_capture.stop()
             self.serial_capture = None
+            self.connection_type = None
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
-            self.log_status("Disconnected")
+            self.log_status("Disconnected from USB/Serial")
+    
+    def disconnect_bluetooth(self):
+        """Disconnect from BLE"""
+        self.stop_monitoring()
+        if self.bluetooth_capture:
+            self.bluetooth_capture.stop()
+            self.bluetooth_capture = None
+            self.connection_type = None
+            self.connection_label.config(text="Status: Not Connected", foreground="red")
+            self.connect_btn.config(text="Connect")
+            self.log_status("Disconnected from BLE")
             
     def start_capture(self):
         """Start capturing data"""
-        if not self.serial_capture or not self.serial_capture.is_connected():
-            messagebox.showerror("Error", "Please connect to a serial port first")
+        if not self.is_connected():
+            messagebox.showerror("Error", "Please connect to a device first")
             return
             
         self.is_capturing = True
@@ -149,23 +301,36 @@ class GolfSwingAnalyzer:
         self.log_status("Data cleared")
         
     def on_data_received(self, data):
-        """Callback when new data is received from serial"""
+        """Callback when new data is received from serial or BLE"""
         # Always log incoming data (even when not capturing) to verify data is being received
         if not hasattr(self, '_data_received_count'):
             self._data_received_count = 0
         self._data_received_count += 1
         
+        # Handle both tuple (from BLE) and dict (from Serial) formats
+        if isinstance(data, tuple) and len(data) == 4:
+            # BLE sends tuple: (q0, q1, q2, q3)
+            q0, q1, q2, q3 = data
+            data_dict = {'q0': q0, 'q1': q1, 'q2': q2, 'q3': q3}
+        elif isinstance(data, dict):
+            # Serial sends dict
+            data_dict = data
+            q0, q1, q2, q3 = data['q0'], data['q1'], data['q2'], data['q3']
+        else:
+            self.log_status(f"Unexpected data format: {type(data)}")
+            return
+        
         # Log periodically to show data is coming in
         if self._data_received_count % 20 == 1:
-            self.log_status(f"Receiving data: Q0:{data['q0']:.3f} Q1:{data['q1']:.3f} Q2:{data['q2']:.3f} Q3:{data['q3']:.3f}")
+            self.log_status(f"Receiving data: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f}")
         
         if self.is_capturing:
-            self.current_data.append(data)
+            self.current_data.append(data_dict)
             self.update_data_count()
             
             # Log to status (limit frequency)
             if len(self.current_data) % 10 == 0:
-                self.log_status(f"Captured: Q0:{data['q0']:.3f} Q1:{data['q1']:.3f} Q2:{data['q2']:.3f} Q3:{data['q3']:.3f}")
+                self.log_status(f"Captured: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f}")
     
     def update_data_count(self):
         """Update data count display"""
@@ -176,6 +341,77 @@ class GolfSwingAnalyzer:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.status_text.insert("end", f"[{timestamp}] {message}\n")
         self.status_text.see("end")
+    
+    def on_connection_lost(self, reason):
+        """Callback when connection is lost"""
+        self.root.after(0, lambda: self._handle_connection_lost(reason))
+    
+    def _handle_connection_lost(self, reason):
+        """Handle connection lost in main thread"""
+        self.log_status(f"CONNECTION LOST: {reason}")
+        self.connection_label.config(text="Status: Connection Lost", foreground="orange")
+        
+        if self.is_capturing:
+            self.stop_capture()
+        
+        # Show dialog
+        result = messagebox.askyesno(
+            "Connection Lost",
+            f"Connection lost: {reason}\n\nAttempt to reconnect?"
+        )
+        
+        if result:
+            self.log_status("Attempting to reconnect...")
+            self.disconnect_serial()
+            time.sleep(1)
+            self.connect_serial()
+    
+    def start_monitoring(self):
+        """Start connection monitoring thread"""
+        if not self.monitoring:
+            self.monitoring = True
+            self.monitor_thread = threading.Thread(target=self._monitor_connection, daemon=True)
+            self.monitor_thread.start()
+    
+    def stop_monitoring(self):
+        """Stop connection monitoring thread"""
+        self.monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread = None
+    
+    def _monitor_connection(self):
+        """Monitor connection health"""
+        while self.monitoring:
+            try:
+                capture = self.serial_capture if self.connection_type == "serial" else self.bluetooth_capture
+                
+                if capture and capture.is_connected():
+                    stats = capture.get_stats()
+                    
+                    # Log stats periodically
+                    if stats['total_received'] > 0 and stats['total_received'] % 100 == 0:
+                        self.root.after(0, lambda s=stats: self.log_status(
+                            f"Stats: {s['total_received']} received, {s['total_parsed']} parsed ({s['parse_rate']:.1f}%)"
+                        ))
+                    
+                    # Check if data has stopped
+                    if stats['seconds_since_data'] and stats['seconds_since_data'] > 3.0:
+                        self.root.after(0, lambda s=stats: self.log_status(
+                            f"WARNING: No data for {s['seconds_since_data']:.1f} seconds"
+                        ))
+                        self.root.after(0, lambda: self.connection_label.config(
+                            text="Status: Connected (No Data)", foreground="orange"
+                        ))
+                else:
+                    # Connection lost
+                    if capture:
+                        self.monitoring = False
+                        break
+                        
+            except Exception as e:
+                print(f"Monitor error: {e}")
+            
+            time.sleep(1)  # Check every second
         
     def save_data(self):
         """Save current data to file"""
