@@ -3,3 +3,15 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Python virtual environments
+.venv/
+.venv-new/
+venv/
+env/
+__pycache__/
+
+# Python compiled files
+*.pyc
+*.pyo
+*.pyd

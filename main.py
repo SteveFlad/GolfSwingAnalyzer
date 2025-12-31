@@ -365,6 +365,9 @@ class GolfSwingAnalyzer:
             self.disconnect_serial()
             time.sleep(1)
             self.connect_serial()
+        else:
+            # User chose not to reconnect, clean up connection
+            self.disconnect_serial()
     
     def start_monitoring(self):
         """Start connection monitoring thread"""
