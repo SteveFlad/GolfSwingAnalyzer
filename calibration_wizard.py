@@ -14,7 +14,7 @@ class CalibrationWizard:
     Interactive wizard for calibrating the ICM-20948 sensor orientation
     """
     
-    def __init__(self, parent, capture_device, calibration_obj):
+    def __init__(self, parent, capture_device, calibration_obj, on_complete=None):
         """
         Initialize calibration wizard
         
@@ -26,10 +26,13 @@ class CalibrationWizard:
             Device to capture data from
         calibration_obj : SensorCalibration
             Calibration object to update
+        on_complete : callable, optional
+            Callback function to call when calibration completes successfully
         """
         self.parent = parent
         self.capture = capture_device
         self.calibration = calibration_obj
+        self.on_complete = on_complete
         
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Sensor Calibration Wizard")
@@ -52,6 +55,9 @@ class CalibrationWizard:
         self.collecting = False
         self.sample_count = 0
         self.target_samples = 50  # Samples per position
+        self.attempt_count = 0  # Track total attempts to prevent infinite loops
+        self.max_attempts = 500  # Max attempts (500 * 40ms = 20 seconds)
+        self.calibration_initialized = False  # Track if calibration mode has been enabled
         
         self.setup_ui()
         
@@ -101,7 +107,7 @@ class CalibrationWizard:
         button_frame = ttk.Frame(self.dialog)
         button_frame.pack(fill="x", padx=20, pady=10)
         
-        self.start_btn = ttk.Button(button_frame, text="Start Calibration", 
+        self.start_btn = ttk.Button(button_frame, text="Full Calibration", 
                                      command=self.start_calibration)
         self.start_btn.pack(side="left", padx=5)
         
@@ -127,7 +133,7 @@ Two calibration methods are available:
    • More accurate orientation mapping
    • Requires 4 club positions
    • Takes about 2 minutes
-   • Click "Start Calibration" to begin
+   • Click "Full Calibration" to begin
 
 2. SIMPLE CALIBRATION (Quick):
    • Basic gravity-based alignment
@@ -160,6 +166,7 @@ Make sure your sensor is securely mounted to the club head before proceeding.
     
     def simple_calibration(self):
         """Perform simple gravity-based calibration"""
+        print("[WIZARD DEBUG] simple_calibration() called!")
         self.start_btn.config(state="disabled")
         self.skip_btn.config(state="disabled")
         
@@ -175,24 +182,50 @@ Click "Collect" when ready. Keep the club steady for 2 seconds.
 """
         self.update_instructions(instructions)
         
+        print("[WIZARD DEBUG] Setting up Collect button...")
         self.start_btn.config(text="Collect", state="normal", 
-                             command=lambda: self.collect_simple())
+                             command=self.collect_simple)
+        print("[WIZARD DEBUG] Button configured!")
     
     def collect_simple(self):
         """Collect samples for simple calibration"""
+        print("[WIZARD DEBUG] collect_simple() called!")
+        
+        # Prevent restarting if already collecting
+        if self.collecting:
+            print("[WIZARD DEBUG] Already collecting, ignoring button click")
+            return
+        
         self.start_btn.config(state="disabled")
         self.update_instructions("Collecting samples... Hold steady!\n\nSamples: 0/50")
         
         self.position_samples['address'] = []
         self.sample_count = 0
+        self.attempt_count = 0
         self.target_samples = 50
         self.collecting = True
+        self.calibration_initialized = False  # Reset for this collection
         
+        print(f"[WIZARD DEBUG] Starting collection loop, collecting={self.collecting}")
         # Start collection with callback
         self.collect_samples_simple()
     
     def collect_samples_simple(self):
         """Collect samples with timer for simple calibration"""
+        print(f"[WIZARD DEBUG] collect_samples_simple called, collecting={self.collecting}, count={self.sample_count}")
+        
+        # Check for timeout
+        if self.attempt_count >= self.max_attempts:
+            self.collecting = False
+            if hasattr(self.capture, 'disable_calibration_mode'):
+                self.capture.disable_calibration_mode()
+            messagebox.showerror("Timeout", 
+                f"Collection timed out after {self.max_attempts * 40 / 1000:.1f} seconds.\n"
+                f"Only collected {self.sample_count}/{self.target_samples} samples.\n\n"
+                "Make sure the sensor is connected and sending data.")
+            self.close()
+            return
+        
         if not self.collecting or self.sample_count >= self.target_samples:
             # Finish collection
             self.collecting = False
@@ -202,34 +235,68 @@ Click "Collect" when ready. Keep the club steady for 2 seconds.
             self.finish_simple_calibration()
             return
         
-        # Enable calibration mode on first call
-        if self.sample_count == 0:
+        self.attempt_count += 1
+        
+        # Enable calibration mode on first call (only once)
+        if not self.calibration_initialized:
+            self.calibration_initialized = True
+            print("[WIZARD] ==> Enabling calibration mode (first time)...")
             if hasattr(self.capture, 'enable_calibration_mode'):
-                self.capture.enable_calibration_mode()
-                # Wait a bit for mode to activate
-                self.dialog.after(200, self.collect_samples_simple)
+                result = self.capture.enable_calibration_mode()
+                print(f"[WIZARD] ==> enable_calibration_mode() returned: {result}")
+                # Check calibration mode state
+                if hasattr(self.capture, 'calibration_mode'):
+                    print(f"[WIZARD] ==> capture.calibration_mode = {self.capture.calibration_mode}")
+                # Wait a bit for mode to activate and data to start flowing
+                self.dialog.after(500, self.collect_samples_simple)  # Increased wait time
                 return
+            else:
+                print("[WIZARD ERROR] capture doesn't have enable_calibration_mode!")
         
         # Try to get current data from capture device
         try:
             # Request fresh data
             if hasattr(self.capture, 'get_latest_raw_data'):
                 raw_data = self.capture.get_latest_raw_data()
+                
+                # Debug: Always show first 10 attempts
+                if self.attempt_count <= 10:
+                    print(f"[WIZARD] Attempt {self.attempt_count}: raw_data type={type(raw_data)}, is_none={raw_data is None}")
+                    if raw_data is not None:
+                        print(f"[WIZARD] Attempt {self.attempt_count}: keys={list(raw_data.keys()) if isinstance(raw_data, dict) else 'NOT_A_DICT'}")
+                
                 if raw_data and 'accel' in raw_data:
                     accel = raw_data['accel']
                     self.position_samples['address'].append(accel)
                     self.sample_count += 1
+                    
+                    if self.sample_count <= 5:
+                        print(f"[WIZARD] ✓ Sample #{self.sample_count} collected! Accel: {accel}")
                     
                     # Update progress
                     self.update_instructions(
                         f"Collecting samples... Hold steady!\n\nSamples: {self.sample_count}/{self.target_samples}")
                     progress = int((self.sample_count / self.target_samples) * 100)
                     self.progress_var.set(progress)
+                else:
+                    if self.attempt_count <= 10:
+                        has_accel = 'accel' in raw_data if isinstance(raw_data, dict) else False
+                        print(f"[WIZARD] ✗ Attempt {self.attempt_count}: Invalid data - raw_data={raw_data is not None}, has_accel={has_accel}")
+            else:
+                if self.sample_count == 0:
+                    print("[WIZARD ERROR] Capture device doesn't have get_latest_raw_data method")
         except Exception as e:
             print(f"Error collecting sample: {e}")
+            import traceback
+            traceback.print_exc()
         
-        # Schedule next collection
-        self.dialog.after(40, self.collect_samples_simple)  # ~25Hz
+        # Check if we have enough samples
+        if self.sample_count >= self.target_samples:
+            print(f"[CAL DEBUG] Target reached! Collected {self.sample_count} samples")
+            self.finish_simple_calibration()
+        else:
+            # Schedule next collection
+            self.dialog.after(40, self.collect_samples_simple)  # ~25Hz
     
     def finish_simple_calibration(self):
         """Complete simple calibration"""
@@ -246,6 +313,8 @@ Click "Collect" when ready. Keep the club steady for 2 seconds.
             messagebox.showinfo("Success", 
                 "Simple calibration complete!\n\n" +
                 "The sensor has been calibrated for basic orientation.")
+            if self.on_complete:
+                self.on_complete()
             self.close()
         else:
             messagebox.showerror("Error", 
@@ -326,6 +395,8 @@ Click "Collect Data" when ready. Hold steady for 2 seconds.
         self.start_btn.config(state="disabled")
         self.collecting = True
         self.sample_count = 0
+        self.attempt_count = 0
+        self.calibration_initialized = False  # Reset for this position
         self.position_samples[self.current_position] = []
         
         self.update_instructions(f"Collecting {self.current_position} data...\nHold steady!\n\nSamples: 0/{self.target_samples}")
@@ -335,6 +406,18 @@ Click "Collect Data" when ready. Hold steady for 2 seconds.
     
     def collect_samples_loop(self):
         """Loop to collect samples for current position"""
+        # Check for timeout
+        if self.attempt_count >= self.max_attempts:
+            self.collecting = False
+            if self.current_position == 'face_up' and hasattr(self.capture, 'disable_calibration_mode'):
+                self.capture.disable_calibration_mode()
+            messagebox.showerror("Timeout", 
+                f"Collection timed out for position '{self.current_position}' after {self.max_attempts * 40 / 1000:.1f} seconds.\n"
+                f"Only collected {self.sample_count}/{self.target_samples} samples.\n\n"
+                "Make sure the sensor is connected and sending data.")
+            self.close()
+            return
+        
         if not self.collecting or self.sample_count >= self.target_samples:
             # Finish this position
             self.collecting = False
@@ -345,29 +428,51 @@ Click "Collect Data" when ready. Hold steady for 2 seconds.
             self.finish_position()
             return
         
-        # Enable calibration mode on first call of first position
-        if self.sample_count == 0 and self.current_position == 'address':
+        self.attempt_count += 1
+        
+        # Enable calibration mode on first call of first position (only once)
+        if self.current_position == 'address' and not self.calibration_initialized:
+            self.calibration_initialized = True
+            print(f"[WIZARD] ==> Enabling calibration mode for {self.current_position} (first time)...")
             if hasattr(self.capture, 'enable_calibration_mode'):
-                self.capture.enable_calibration_mode()
-                # Wait a bit for mode to activate
-                self.dialog.after(200, self.collect_samples_loop)
+                result = self.capture.enable_calibration_mode()
+                print(f"[WIZARD] ==> enable_calibration_mode() returned: {result}")
+                if hasattr(self.capture, 'calibration_mode'):
+                    print(f"[WIZARD] ==> capture.calibration_mode = {self.capture.calibration_mode}")
+                # Wait a bit for mode to activate and data to start flowing
+                self.dialog.after(500, self.collect_samples_loop)  # Increased wait time
                 return
         
         # Try to get current data
         try:
             if hasattr(self.capture, 'get_latest_raw_data'):
                 raw_data = self.capture.get_latest_raw_data()
+                
+                # Debug: Always show first 10 attempts
+                if self.attempt_count <= 10:
+                    print(f"[WIZARD] Position {self.current_position}, Attempt {self.attempt_count}: raw_data={raw_data is not None}")
+                    if raw_data is not None:
+                        print(f"[WIZARD] Keys: {list(raw_data.keys()) if isinstance(raw_data, dict) else 'NOT_A_DICT'}")
+                
                 if raw_data and 'accel' in raw_data:
                     accel = raw_data['accel']
                     self.position_samples[self.current_position].append(accel)
                     self.sample_count += 1
                     
+                    if self.sample_count <= 5:
+                        print(f"[WIZARD] ✓ Sample #{self.sample_count} for {self.current_position}: {accel}")
+                    
                     # Update UI
                     self.update_instructions(
                         f"Collecting {self.current_position} data...\nHold steady!\n\n" +
                         f"Samples: {self.sample_count}/{self.target_samples}")
+                else:
+                    if self.attempt_count <= 10:
+                        print(f"[WIZARD] ✗ No valid data for {self.current_position}")
         except Exception as e:
             print(f"Error collecting sample: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Continue loop
         self.dialog.after(40, self.collect_samples_loop)
@@ -409,6 +514,8 @@ Click "Collect Data" when ready. Hold steady for 2 seconds.
                 "Full calibration complete!\n\n" +
                 "The sensor orientation has been calibrated.\n" +
                 "Your sensor data will now be properly oriented to the club frame.")
+            if self.on_complete:
+                self.on_complete()
             self.close()
         else:
             messagebox.showerror("Error", 

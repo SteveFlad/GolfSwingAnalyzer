@@ -238,6 +238,9 @@ class BLECapture:
                     'type': 'raw'
                 }
                 
+                if self.total_parsed <= 5:
+                    print(f"[CAL DEBUG] BLE: Parsed RAW data #{self.total_parsed}: accel={[ax,ay,az]}")
+                
                 if self.data_callback:
                     self.data_callback(self.latest_raw_data)
                 
@@ -287,13 +290,15 @@ class BLECapture:
         """Enable calibration mode to receive raw sensor data"""
         if self.is_connected() and self.client:
             self.calibration_mode = True
+            self.latest_raw_data = None  # Clear old data
             # Send command via BLE write
             asyncio.run_coroutine_threadsafe(
                 self.client.write_gatt_char(self.CHARACTERISTIC_UUID, b"CAL_START"),
                 self.asyncio_loop
             )
-            print("BLE: Calibration mode enabled")
+            print("[CAL DEBUG] BLE: Calibration mode enabled - CAL_START sent")
             return True
+        print("[CAL DEBUG] BLE: Could not enable calibration - not connected")
         return False
     
     def disable_calibration_mode(self):
@@ -305,7 +310,7 @@ class BLECapture:
                 self.client.write_gatt_char(self.CHARACTERISTIC_UUID, b"CAL_STOP"),
                 self.asyncio_loop
             )
-            print("BLE: Calibration mode disabled")
+            print("[CAL DEBUG] BLE: Calibration mode disabled - CAL_STOP sent")
             return True
         return False
     

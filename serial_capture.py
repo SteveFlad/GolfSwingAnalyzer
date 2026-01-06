@@ -44,6 +44,7 @@ class SerialCapture:
             r'RAW\s+AX:([-+]?\d*\.?\d+)\s+AY:([-+]?\d*\.?\d+)\s+AZ:([-+]?\d*\.?\d+)\s+' +
             r'GX:([-+]?\d*\.?\d+)\s+GY:([-+]?\d*\.?\d+)\s+GZ:([-+]?\d*\.?\d+)'
         )
+        self.raw_data_received_count = 0
         
     def start(self):
         """Start serial communication"""
@@ -87,9 +88,14 @@ class SerialCapture:
         """Enable calibration mode to receive raw sensor data"""
         if self.serial_conn and self.serial_conn.is_open:
             self.calibration_mode = True
+            self.latest_raw_data = None  # Clear old data
+            self.raw_data_received_count = 0
             self.serial_conn.write(b"CAL_START\n")
-            print("Calibration mode enabled")
+            self.serial_conn.flush()  # Ensure command is sent immediately
+            print("[CAL DEBUG] Calibration mode enabled - CAL_START command sent")
+            time.sleep(0.1)  # Give firmware time to respond
             return True
+        print("[CAL DEBUG] Could not enable calibration - serial not open")
         return False
     
     def disable_calibration_mode(self):
@@ -137,6 +143,10 @@ class SerialCapture:
                             if line_count <= 10 or line_count % 50 == 0:
                                 print(f"[DEBUG] Received line {line_count}: {line}")
                             
+                            # Always print RAW lines during calibration
+                            if self.calibration_mode and line.startswith("RAW"):
+                                print(f"[CAL DEBUG] RAW line received: {line}")
+                            
                             data = self._parse_line(line)
                             if data:
                                 self.total_parsed += 1
@@ -179,6 +189,9 @@ class SerialCapture:
         # Try to parse raw sensor data first
         raw_match = self.raw_pattern.search(line)
         if raw_match:
+            self.raw_data_received_count += 1
+            if self.raw_data_received_count <= 5:
+                print(f"[CAL DEBUG] Successfully matched RAW line #{self.raw_data_received_count}: {line}")
             try:
                 ax = float(raw_match.group(1))
                 ay = float(raw_match.group(2))
@@ -201,6 +214,9 @@ class SerialCapture:
                 return data
             except ValueError:
                 return None
+        elif self.calibration_mode and line.startswith("RAW"):
+            print(f"[CAL DEBUG] RAW line did NOT match regex pattern: {line}")
+            print(f"[CAL DEBUG] Expected pattern: RAW AX:# AY:# AZ:# GX:# GY:# GZ:#")
         
         # Try to parse quaternion data
         match = self.pattern.search(line)

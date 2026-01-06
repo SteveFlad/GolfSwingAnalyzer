@@ -331,6 +331,19 @@ class GolfSwingAnalyzer:
         elif isinstance(data, dict):
             # Serial sends dict
             data_dict = data
+            
+            # Check if this is raw sensor data (during calibration)
+            if 'type' in data_dict and data_dict['type'] == 'raw':
+                # Raw sensor data - just pass through, don't log as quaternion
+                if self._data_received_count % 20 == 1:
+                    accel = data_dict.get('accel', [0, 0, 0])
+                    self.log_status(f"Receiving raw data: AX:{accel[0]:.2f} AY:{accel[1]:.2f} AZ:{accel[2]:.2f}")
+                return  # Don't process as quaternion data
+            
+            # Extract quaternion data
+            if 'q0' not in data_dict:
+                self.log_status(f"Unexpected data format: {data_dict}")
+                return
             q0, q1, q2, q3 = data['q0'], data['q1'], data['q2'], data['q3']
         else:
             self.log_status(f"Unexpected data format: {type(data)}")
@@ -512,11 +525,11 @@ class GolfSwingAnalyzer:
         # Get the current capture device
         capture_device = self.serial_capture if self.connection_type == "serial" else self.bluetooth_capture
         
-        # Open calibration wizard
-        wizard = CalibrationWizard(self.root, capture_device, self.calibration)
+        # Open calibration wizard with callback to update status when complete
+        wizard = CalibrationWizard(self.root, capture_device, self.calibration,
+                                  on_complete=self.update_calibration_status)
         
-        # Update status label after wizard closes
-        self.root.after(500, self.update_calibration_status)
+        # Note: No need for self.root.after() - callback handles it
     
     def reset_calibration(self):
         """Reset calibration to default"""
