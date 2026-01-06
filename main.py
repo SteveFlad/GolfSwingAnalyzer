@@ -18,10 +18,13 @@ except ImportError:
     scan_ble_devices_sync = None
     BLUETOOTH_TYPE = None
 from visualizer import SwingVisualizer
+from sensor_calibration import SensorCalibration
+from calibration_wizard import CalibrationWizard
 import threading
 import json
 import time
 from datetime import datetime
+import numpy as np
 
 
 class GolfSwingAnalyzer:
@@ -38,6 +41,9 @@ class GolfSwingAnalyzer:
         self.monitor_thread = None
         self.monitoring = False
         self.bt_devices = []
+        
+        # Initialize sensor calibration
+        self.calibration = SensorCalibration('calibration_data.json')
         
         self.setup_ui()
         self.refresh_ports()
@@ -86,6 +92,16 @@ class GolfSwingAnalyzer:
         ttk.Button(file_frame, text="Save Data", command=self.save_data).pack(side="left", padx=5)
         ttk.Button(file_frame, text="Load Data", command=self.load_data).pack(side="left", padx=5)
         ttk.Button(file_frame, text="Visualize 3D", command=self.visualize_3d).pack(side="left", padx=5)
+        
+        # Calibration Controls
+        calib_frame = ttk.LabelFrame(self.root, text="Sensor Calibration", padding=10)
+        calib_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Button(calib_frame, text="Calibrate Sensor", command=self.start_calibration_wizard).pack(side="left", padx=5)
+        ttk.Button(calib_frame, text="Reset Calibration", command=self.reset_calibration).pack(side="left", padx=5)
+        
+        self.calib_status_label = ttk.Label(calib_frame, text=f"Status: {self.calibration.get_calibration_status()}")
+        self.calib_status_label.pack(side="left", padx=10)
         
         # Status Display
         status_frame = ttk.LabelFrame(self.root, text="Status", padding=10)
@@ -320,6 +336,21 @@ class GolfSwingAnalyzer:
             self.log_status(f"Unexpected data format: {type(data)}")
             return
         
+        # Apply calibration if available (for raw sensor data if present)
+        if self.calibration.is_calibrated and 'accel' in data_dict:
+            try:
+                accel_calibrated = self.calibration.transform_accel(data_dict['accel'])
+                data_dict['accel_calibrated'] = accel_calibrated.tolist()
+            except Exception as e:
+                pass  # Ignore calibration errors
+        
+        if self.calibration.is_calibrated and 'gyro' in data_dict:
+            try:
+                gyro_calibrated = self.calibration.transform_gyro(data_dict['gyro'])
+                data_dict['gyro_calibrated'] = gyro_calibrated.tolist()
+            except Exception as e:
+                pass  # Ignore calibration errors
+        
         # Log periodically to show data is coming in
         if self._data_received_count % 20 == 1:
             self.log_status(f"Receiving data: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f}")
@@ -472,6 +503,40 @@ class GolfSwingAnalyzer:
             messagebox.showerror("Visualization Error", str(e))
             self.log_status(f"Visualization error: {e}")
             
+    def start_calibration_wizard(self):
+        """Open the calibration wizard"""
+        if not self.is_connected():
+            messagebox.showerror("Error", "Please connect to a device first")
+            return
+        
+        # Get the current capture device
+        capture_device = self.serial_capture if self.connection_type == "serial" else self.bluetooth_capture
+        
+        # Open calibration wizard
+        wizard = CalibrationWizard(self.root, capture_device, self.calibration)
+        
+        # Update status label after wizard closes
+        self.root.after(500, self.update_calibration_status)
+    
+    def reset_calibration(self):
+        """Reset calibration to default"""
+        result = messagebox.askyesno("Reset Calibration", 
+            "Are you sure you want to reset the calibration?\n" +
+            "This will revert to default (uncalibrated) sensor orientation.")
+        
+        if result:
+            self.calibration.reset_calibration()
+            self.update_calibration_status()
+            self.log_status("Calibration reset to default")
+    
+    def update_calibration_status(self):
+        """Update calibration status label"""
+        status = self.calibration.get_calibration_status()
+        self.calib_status_label.config(text=f"Status: {status}")
+        
+        if self.calibration.is_calibrated:
+            self.log_status("Sensor calibration active")
+    
     def on_closing(self):
         """Handle window closing"""
         if self.serial_capture:

@@ -4,7 +4,8 @@ A Python-based GUI application for capturing, analyzing, and visualizing golf cl
 
 ## Features
 
-- **Real-time Data Capture**: Connect to ESP32 via serial port and capture quaternion orientation data
+- **Real-time Data Capture**: Connect to ESP32 via USB/Serial or Bluetooth Low Energy (BLE)
+- **Sensor Calibration**: Automatic orientation calibration for any sensor mounting angle
 - **3D Visualization**: View the club head path in 3D space with multiple perspectives
 - **Speed Analysis**: Track and display club head speed throughout the swing
 - **Face Direction**: Visualize club face orientation at all points in the swing
@@ -43,6 +44,26 @@ A Python-based GUI application for capturing, analyzing, and visualizing golf cl
 python main.py
 ```
 
+### Sensor Calibration (Recommended First Step)
+
+**Important**: If this is your first time using the sensor or if you've remounted it, calibrate the sensor first to ensure accurate data regardless of mounting orientation.
+
+1. **Connect to Device:**
+   - Select your COM port (USB) or scan for Bluetooth device
+   - Click "Connect"
+   - Wait for "Status: Connected"
+
+2. **Calibrate:**
+   - Click "Calibrate Sensor"
+   - Follow the on-screen wizard for either:
+     - **Full Calibration** (2 min, most accurate) - 4 club positions
+     - **Simple Calibration** (30 sec, basic) - 1 position only
+   - See [QUICKSTART_CALIBRATION.md](QUICKSTART_CALIBRATION.md) for detailed steps
+
+3. **Verify:**
+   - Check for "Status: Calibrated" in the Sensor Calibration section
+   - Calibration is saved automatically for future sessions
+
 ### Capturing a Swing
 
 1. **Connect to ESP32:**
@@ -80,12 +101,21 @@ python main.py
 
 ```
 GolfSwingAnalyzer/
-├── main.py                 # Main GUI application
-├── serial_capture.py       # Serial communication module
-├── visualizer.py           # 3D visualization module
-├── requirements.txt        # Python dependencies
-├── README.md              # This file
-└── data/                  # Directory for saved swing data
+├── main.py                      # Main GUI application
+├── serial_capture.py            # Serial communication module
+├── ble_capture.py               # Bluetooth Low Energy communication
+├── sensor_calibration.py        # Sensor orientation calibration
+├── calibration_wizard.py        # Interactive calibration UI
+├── visualizer.py                # 3D visualization module
+├── requirements.txt             # Python dependencies
+├── README.md                    # This file
+├── README_CALIBRATION.md        # Detailed calibration guide
+├── QUICKSTART_CALIBRATION.md    # Quick calibration reference
+├── README_BLUETOOTH.md          # Bluetooth setup guide
+├── src/
+│   └── main.cpp                 # ESP32 firmware with BLE support
+├── data/                        # Directory for saved swing data
+└── calibration_data.json        # Saved sensor calibration (auto-generated)
 ```
 
 ## Data Format
@@ -130,17 +160,28 @@ Red arrows indicate the direction the club face is pointing at various points in
 ### "No serial port found"
 - Ensure ESP32 is connected via USB
 - Check that USB drivers are installed
-- Try clicking "Refresh" to update the port list
+- Try clicking "Refresh" or "Scan" to update the port list
 
 ### "Failed to connect"
-- Verify the correct COM port is selected
+- Verify the correct COM port or Bluetooth device is selected
 - Ensure no other program is using the serial port
 - Check that ESP32 firmware is running correctly
+- For Bluetooth: See [README_BLUETOOTH.md](README_BLUETOOTH.md)
 
 ### Visualization not appearing
 - Ensure you have captured or loaded data
 - Check that matplotlib is properly installed
 - Try closing and reopening the visualization
+
+### Calibration Issues
+- See [README_CALIBRATION.md](README_CALIBRATION.md) for detailed troubleshooting
+- Try Simple Calibration if Full Calibration fails
+- Ensure device is connected and sending data
+
+### More Help
+- **I2C Issues**: See [TROUBLESHOOTING_I2C.md](TROUBLESHOOTING_I2C.md)
+- **Serial Issues**: See [TROUBLESHOOTING_SERIAL.md](TROUBLESHOOTING_SERIAL.md)
+- **Bluetooth Issues**: See [README_BLUETOOTH.md](README_BLUETOOTH.md)
 
 ## Future Enhancements
 

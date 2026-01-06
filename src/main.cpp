@@ -53,6 +53,9 @@ float beta = 0.5f;  // Filter gain (increased for faster response)
 unsigned long lastUpdate = 0;
 int sampleCount = 0;
 
+// Calibration mode
+bool calibrationMode = false;
+
 // BLE Server Callbacks
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -79,6 +82,15 @@ class MyCharacteristicCallbacks: public BLECharacteristicCallbacks {
         if (value.length() > 0) {
             Serial.print("[BLE] Received: ");
             Serial.println(value.c_str());
+            
+            // Check for calibration command
+            if (value == "CAL_START") {
+                calibrationMode = true;
+                Serial.println("[CAL] Calibration mode enabled");
+            } else if (value == "CAL_STOP") {
+                calibrationMode = false;
+                Serial.println("[CAL] Calibration mode disabled");
+            }
         }
     }
 };
@@ -313,6 +325,20 @@ void setup() {
 void loop() {
     sensors_event_t accel, gyro, mag, temp;
     
+    // Check for serial commands
+    if (Serial.available() > 0) {
+        String command = Serial.readStringUntil('\n');
+        command.trim();
+        
+        if (command == "CAL_START") {
+            calibrationMode = true;
+            Serial.println("[CAL] Calibration mode enabled");
+        } else if (command == "CAL_STOP") {
+            calibrationMode = false;
+            Serial.println("[CAL] Calibration mode disabled");
+        }
+    }
+    
     // Read sensor data with error checking
     bool success = icm.getEvent(&accel, &gyro, &temp, &mag);
     
@@ -344,21 +370,36 @@ void loop() {
         return;
     }
     
-    // Update quaternion using Madgwick filter
-    if (dt > 0.001f && dt < 1.0f) {  // Valid time delta
-        MadgwickQuaternionUpdate(ax, ay, az, gx, gy, gz, dt);
+    if (calibrationMode) {
+        // In calibration mode, send raw sensor data
+        char message[150];
+        snprintf(message, sizeof(message), 
+                "RAW AX:%.4f AY:%.4f AZ:%.4f GX:%.4f GY:%.4f GZ:%.4f", 
+                ax, ay, az, gx, gy, gz);
         
-        // Format quaternion message
-        char message[100];
-        snprintf(message, sizeof(message), "Q0:%.4f Q1:%.4f Q2:%.4f Q3:%.4f", q0, q1, q2, q3);
-        
-        // Send via USB Serial
         Serial.println(message);
         
-        // Send via BLE if connected
         if (bleConnected && pCharacteristic) {
             pCharacteristic->setValue(message);
             pCharacteristic->notify();
+        }
+    } else {
+        // Normal mode: Update quaternion using Madgwick filter
+        if (dt > 0.001f && dt < 1.0f) {  // Valid time delta
+            MadgwickQuaternionUpdate(ax, ay, az, gx, gy, gz, dt);
+            
+            // Format quaternion message
+            char message[100];
+            snprintf(message, sizeof(message), "Q0:%.4f Q1:%.4f Q2:%.4f Q3:%.4f", q0, q1, q2, q3);
+            
+            // Send via USB Serial
+            Serial.println(message);
+            
+            // Send via BLE if connected
+            if (bleConnected && pCharacteristic) {
+                pCharacteristic->setValue(message);
+                pCharacteristic->notify();
+            }
         }
     }
     

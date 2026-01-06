@@ -32,8 +32,18 @@ class SerialCapture:
         self.total_received = 0
         self.total_parsed = 0
         
+        # Latest data storage for calibration
+        self.latest_raw_data = None
+        self.calibration_mode = False
+        
         # Regex pattern to match quaternion data: Q0:0.123 Q1:-0.456 Q2:0.789 Q3:-0.012
         self.pattern = re.compile(r'Q0:([-+]?\d*\.?\d+)\s+Q1:([-+]?\d*\.?\d+)\s+Q2:([-+]?\d*\.?\d+)\s+Q3:([-+]?\d*\.?\d+)')
+        
+        # Regex pattern to match raw sensor data: RAW AX:1.23 AY:-4.56 AZ:9.81 GX:0.12 GY:-0.34 GZ:0.56
+        self.raw_pattern = re.compile(
+            r'RAW\s+AX:([-+]?\d*\.?\d+)\s+AY:([-+]?\d*\.?\d+)\s+AZ:([-+]?\d*\.?\d+)\s+' +
+            r'GX:([-+]?\d*\.?\d+)\s+GY:([-+]?\d*\.?\d+)\s+GZ:([-+]?\d*\.?\d+)'
+        )
         
     def start(self):
         """Start serial communication"""
@@ -72,6 +82,28 @@ class SerialCapture:
             'last_data_time': self.last_data_time,
             'seconds_since_data': (time.time() - self.last_data_time) if self.last_data_time else None
         }
+    
+    def enable_calibration_mode(self):
+        """Enable calibration mode to receive raw sensor data"""
+        if self.serial_conn and self.serial_conn.is_open:
+            self.calibration_mode = True
+            self.serial_conn.write(b"CAL_START\n")
+            print("Calibration mode enabled")
+            return True
+        return False
+    
+    def disable_calibration_mode(self):
+        """Disable calibration mode to receive quaternion data"""
+        if self.serial_conn and self.serial_conn.is_open:
+            self.calibration_mode = False
+            self.serial_conn.write(b"CAL_STOP\n")
+            print("Calibration mode disabled")
+            return True
+        return False
+    
+    def get_latest_raw_data(self):
+        """Get the most recent raw sensor data (for calibration)"""
+        return self.latest_raw_data
         
     def _read_loop(self):
         """Main reading loop (runs in separate thread)"""
@@ -139,9 +171,38 @@ class SerialCapture:
         
     def _parse_line(self, line):
         """
-        Parse a line of quaternion data
-        Expected format: Q0:0.123 Q1:-0.456 Q2:0.789 Q3:-0.012
+        Parse a line of quaternion or raw sensor data
+        Expected formats:
+        - Quaternion: Q0:0.123 Q1:-0.456 Q2:0.789 Q3:-0.012
+        - Raw sensor: RAW AX:1.23 AY:-4.56 AZ:9.81 GX:0.12 GY:-0.34 GZ:0.56
         """
+        # Try to parse raw sensor data first
+        raw_match = self.raw_pattern.search(line)
+        if raw_match:
+            try:
+                ax = float(raw_match.group(1))
+                ay = float(raw_match.group(2))
+                az = float(raw_match.group(3))
+                gx = float(raw_match.group(4))
+                gy = float(raw_match.group(5))
+                gz = float(raw_match.group(6))
+                
+                data = {
+                    'accel': [ax, ay, az],
+                    'gyro': [gx, gy, gz],
+                    'timestamp': time.time(),
+                    'raw': line,
+                    'type': 'raw'
+                }
+                
+                # Store for calibration access
+                self.latest_raw_data = data
+                
+                return data
+            except ValueError:
+                return None
+        
+        # Try to parse quaternion data
         match = self.pattern.search(line)
         if match:
             try:
@@ -156,7 +217,8 @@ class SerialCapture:
                     'q2': q2,
                     'q3': q3,
                     'timestamp': time.time(),
-                    'raw': line
+                    'raw': line,
+                    'type': 'quaternion'
                 }
             except ValueError:
                 return None

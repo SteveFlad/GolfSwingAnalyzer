@@ -64,8 +64,18 @@ class BLECapture:
         self.last_data_time = None
         self.data_timeout = 5.0  # seconds
         
+        # Latest data storage for calibration
+        self.latest_raw_data = None
+        self.calibration_mode = False
+        
         # Pattern for quaternion data: Q0:w Q1:x Q2:y Q3:z
         self.quaternion_pattern = re.compile(r'Q0:([-\d.]+)\s+Q1:([-\d.]+)\s+Q2:([-\d.]+)\s+Q3:([-\d.]+)')
+        
+        # Pattern for raw sensor data: RAW AX:x.xx AY:y.yy AZ:z.zz GX:x.xx GY:y.yy GZ:z.zz
+        self.raw_pattern = re.compile(
+            r'RAW\s+AX:([-+]?\d*\.?\d+)\s+AY:([-+]?\d*\.?\d+)\s+AZ:([-+]?\d*\.?\d+)\s+' +
+            r'GX:([-+]?\d*\.?\d+)\s+GY:([-+]?\d*\.?\d+)\s+GZ:([-+]?\d*\.?\d+)'
+        )
     
     @staticmethod
     async def scan_devices(timeout: float = 5.0) -> list[BLEDeviceInfo]:
@@ -208,6 +218,31 @@ class BLECapture:
             self.total_received += 1
             self.last_data_time = time.time()
             
+            # Try to parse raw sensor data first
+            raw_match = self.raw_pattern.search(message)
+            if raw_match:
+                ax = float(raw_match.group(1))
+                ay = float(raw_match.group(2))
+                az = float(raw_match.group(3))
+                gx = float(raw_match.group(4))
+                gy = float(raw_match.group(5))
+                gz = float(raw_match.group(6))
+                
+                self.total_parsed += 1
+                
+                # Store for calibration access
+                self.latest_raw_data = {
+                    'accel': [ax, ay, az],
+                    'gyro': [gx, gy, gz],
+                    'timestamp': time.time(),
+                    'type': 'raw'
+                }
+                
+                if self.data_callback:
+                    self.data_callback(self.latest_raw_data)
+                
+                return
+            
             # Try to parse quaternion data
             match = self.quaternion_pattern.search(message)
             if match:
@@ -247,6 +282,36 @@ class BLECapture:
             'total_parsed': self.total_parsed,
             'parse_rate': parse_rate
         }
+    
+    def enable_calibration_mode(self):
+        """Enable calibration mode to receive raw sensor data"""
+        if self.is_connected() and self.client:
+            self.calibration_mode = True
+            # Send command via BLE write
+            asyncio.run_coroutine_threadsafe(
+                self.client.write_gatt_char(self.CHARACTERISTIC_UUID, b"CAL_START"),
+                self.asyncio_loop
+            )
+            print("BLE: Calibration mode enabled")
+            return True
+        return False
+    
+    def disable_calibration_mode(self):
+        """Disable calibration mode to receive quaternion data"""
+        if self.is_connected() and self.client:
+            self.calibration_mode = False
+            # Send command via BLE write
+            asyncio.run_coroutine_threadsafe(
+                self.client.write_gatt_char(self.CHARACTERISTIC_UUID, b"CAL_STOP"),
+                self.asyncio_loop
+            )
+            print("BLE: Calibration mode disabled")
+            return True
+        return False
+    
+    def get_latest_raw_data(self):
+        """Get the most recent raw sensor data (for calibration)"""
+        return self.latest_raw_data
 
 
 # Synchronous wrapper for device scanning
