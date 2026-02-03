@@ -49,7 +49,7 @@ bool bleConnected = false;
 
 // Madgwick filter variables
 float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
-float beta = 0.5f;  // Filter gain (increased for faster response)
+float beta = 0.3f;  // Filter gain - reduced for smoother output (was 0.5f)
 unsigned long lastUpdate = 0;
 int sampleCount = 0;
 

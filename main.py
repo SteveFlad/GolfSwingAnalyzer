@@ -511,7 +511,8 @@ class GolfSwingAnalyzer:
             return
             
         try:
-            visualizer = SwingVisualizer(self.current_data)
+            # Use 'ground' coordinate system: X=left/right (target line), Y=up/down, Z=in/out
+            visualizer = SwingVisualizer(self.current_data, coordinate_system='ground')
             visualizer.show()
         except Exception as e:
             messagebox.showerror("Visualization Error", str(e))

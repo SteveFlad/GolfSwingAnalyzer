@@ -11,15 +11,22 @@ from scipy.spatial.transform import Rotation as R
 
 
 class SwingVisualizer:
-    def __init__(self, data):
+    def __init__(self, data, coordinate_system='ground'):
         """
         Initialize visualizer with quaternion data
+        
+        Parameters:
+        -----------
         data: list of dictionaries with keys 'q0', 'q1', 'q2', 'q3', 'timestamp'
+        coordinate_system: str
+            'ground' - X=left/right (target line), Y=up/down, Z=in/out (toward/away from golfer) (default)
+            'club' - X=up shaft, Y=toe-heel, Z=face normal
         """
         self.data = data
         self.positions = []
         self.velocities = []
         self.orientations = []
+        self.coordinate_system = coordinate_system
         
         self.process_data()
         
@@ -30,6 +37,7 @@ class SwingVisualizer:
         
         position = np.array([0.0, 0.0, 0.0])
         prev_quat = None
+        raw_speeds = []
         
         for i, point in enumerate(self.data):
             # Extract quaternion
@@ -50,17 +58,44 @@ class SwingVisualizer:
                 
                 # Use rotation vector magnitude as speed indicator
                 speed = np.linalg.norm(rotvec)
-                
-                # Move in the direction indicated by current orientation
-                forward = r_curr.apply([0, 0, 1])  # Forward direction
-                position = position + forward * speed * 0.1  # Scale factor
-                
-                self.velocities.append(speed)
+                raw_speeds.append(speed)
             else:
-                self.velocities.append(0.0)
+                raw_speeds.append(0.0)
                 
-            self.positions.append(position.copy())
             prev_quat = quat
+        
+        # Apply moving average filter to reduce noise (smoothing window of 5 samples)
+        smoothed_speeds = np.convolve(raw_speeds, np.ones(5)/5, mode='same')
+        
+        # Apply speed threshold - ignore very small rotations (noise floor)
+        speed_threshold = np.percentile(smoothed_speeds, 25)  # Bottom 25% treated as noise
+        
+        # Rebuild positions with smoothed data
+        position = np.array([0.0, 0.0, 0.0])
+        for i, point in enumerate(self.data):
+            quat = np.array([point['q0'], point['q1'], point['q2'], point['q3']])
+            r_curr = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
+            
+            speed = smoothed_speeds[i]
+            
+            # Only move if speed exceeds noise threshold
+            if speed > speed_threshold:
+                # Determine forward direction based on coordinate system
+                if self.coordinate_system == 'ground':
+                    # Ground frame: X=left/right (target line), Y=up/down, Z=in/out from golfer
+                    # At address: Cal Z (face normal) points along target line (User X)
+                    # Use face normal as forward direction along X-axis
+                    face_direction = r_curr.apply([0, 0, 1])  # Cal Z = face normal
+                    # Project to user coordinate frame: face_direction becomes X-movement
+                    forward = np.array([face_direction[2], face_direction[0], face_direction[1]])
+                else:
+                    # Club frame: X=up shaft, Y=toe-heel, Z=face normal
+                    forward = r_curr.apply([1, 0, 0])  # Use shaft direction as forward
+                    
+                position = position + forward * speed * 0.05  # Reduced scale factor (was 0.1)
+            
+            self.velocities.append(speed)
+            self.positions.append(position.copy())
             
         self.positions = np.array(self.positions)
         self.velocities = np.array(self.velocities)
@@ -117,30 +152,52 @@ class SwingVisualizer:
         )
         
         # Mark start and end
-        ax.scatter(*self.positions[0], color='green', s=50, marker='o', label='Start')
-        ax.scatter(*self.positions[-1], color='red', s=50, marker='X', label='End')
+        ax.scatter(*self.positions[0], color='green', s=100, marker='o', label='Start', zorder=10)
+        ax.scatter(*self.positions[-1], color='red', s=100, marker='X', label='End', zorder=10)
         
-        # Add orientation indicators at key points
-        step = max(1, len(self.positions) // 20)
-        for i in range(0, len(self.positions), step):
-            quat = self.orientations[i]
-            r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
-            
-            # Face direction (forward vector)
-            forward = r.apply([0, 0, 0.125])  # 1/4 of original length
-            pos = self.positions[i]
-            
-            ax.quiver(
-                pos[0], pos[1], pos[2],
-                forward[0], forward[1], forward[2],
-                color='red', alpha=0.5, arrow_length_ratio=0.3
-            )
+        # Calculate trajectory bounds for arrow scaling
+        x_range = np.ptp(self.positions[:, 0]) if len(self.positions) > 1 else 1.0
+        y_range = np.ptp(self.positions[:, 1]) if len(self.positions) > 1 else 1.0
+        z_range = np.ptp(self.positions[:, 2]) if len(self.positions) > 1 else 1.0
+        avg_range = (x_range + y_range + z_range) / 3.0
+        arrow_scale = max(0.02, avg_range * 0.2)  # Scale arrows to 20% of average range
         
-        ax.set_xlabel('X (m)')
-        ax.set_ylabel('Y (m)')
-        ax.set_zlabel('Z (m)')
-        ax.set_title('3D Club Head Trajectory\n(Red arrows = face direction)')
-        ax.legend()
+        # Add velocity direction arrows at key points
+        step = max(1, len(self.positions) // 10)  # Max 10 arrows
+        for i in range(step, len(self.positions) - step, step):  # Skip first/last to calculate velocity
+            # Calculate velocity direction from neighboring positions
+            velocity_vec = self.positions[i + step] - self.positions[i - step]
+            vel_magnitude = np.linalg.norm(velocity_vec)
+            
+            if vel_magnitude > 1e-6:  # Only show if there's actual movement
+                # Normalize and scale velocity vector for arrow
+                velocity_direction = (velocity_vec / vel_magnitude) * arrow_scale
+                pos = self.positions[i]
+                
+                ax.quiver(
+                    pos[0], pos[1], pos[2],
+                    velocity_direction[0], velocity_direction[1], velocity_direction[2],
+                    color='darkred', alpha=0.6, arrow_length_ratio=0.8, linewidth=2.5
+                )
+        
+        # Set axis limits with padding to contain arrows
+        padding = arrow_scale * 1.5
+        ax.set_xlim(self.positions[:, 0].min() - padding, self.positions[:, 0].max() + padding)
+        ax.set_ylim(self.positions[:, 1].min() - padding, self.positions[:, 1].max() + padding)
+        ax.set_zlim(self.positions[:, 2].min() - padding, self.positions[:, 2].max() + padding)
+        
+        # Set labels based on coordinate system
+        if self.coordinate_system == 'ground':
+            ax.set_xlabel('X - Target Line (m)')
+            ax.set_ylabel('Y - Height (m)')
+            ax.set_zlabel('Z - In/Out (m)')
+            ax.set_title('3D Club Head Trajectory\n(Red arrows = velocity direction)')
+        else:
+            ax.set_xlabel('X - Shaft (m)')
+            ax.set_ylabel('Y - Toe/Heel (m)')
+            ax.set_zlabel('Z - Face Normal (m)')
+            ax.set_title('3D Club Head Trajectory\n(Red arrows = velocity direction)')
+        ax.legend(loc='upper left')
         
         # Add colorbar
         cbar = plt.colorbar(scatter, ax=ax, pad=0.1, shrink=0.8)
