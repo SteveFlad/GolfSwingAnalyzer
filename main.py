@@ -78,11 +78,10 @@ class GolfSwingAnalyzer:
         
         # Capture Controls
         ttk.Label(control_frame, text="Capture:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        self.start_btn = ttk.Button(control_frame, text="Start Capture", command=self.start_capture)
-        self.start_btn.grid(row=2, column=1, padx=5, pady=5)
-        
-        self.stop_btn = ttk.Button(control_frame, text="Stop Capture", command=self.stop_capture, state="disabled")
-        self.stop_btn.grid(row=2, column=2, padx=5, pady=5)
+        self.capture_btn = tk.Button(control_frame, text="Start Capture", command=self.toggle_capture,
+                         bg="green", fg="white", font=("Arial", 10, "bold"),
+                         padx=10, pady=5)
+        self.capture_btn.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
         
         ttk.Button(control_frame, text="Clear Data", command=self.clear_data).grid(row=2, column=3, padx=5, pady=5)
         
@@ -154,7 +153,9 @@ class GolfSwingAnalyzer:
     def refresh_ports(self):
         """Refresh available serial ports"""
         ports = serial.tools.list_ports.comports()
-        port_list = [port.device for port in ports]
+        # Filter out virtual Bluetooth COM ports (Windows creates these for legacy Bluetooth)
+        filtered_ports = [p for p in ports if "Standard Serial over Bluetooth" not in p.description]
+        port_list = [port.device for port in filtered_ports]
         self.port_combo['values'] = port_list
         if port_list:
             self.port_combo.current(0)
@@ -291,25 +292,24 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
             self.log_status("Disconnected from BLE")
+    
+    def toggle_capture(self):
+        """Toggle capture on/off"""
+        if self.is_capturing:
+            # Stop capturing
+            self.is_capturing = False
+            self.capture_btn.config(text="Start Capture", bg="green")
+            self.log_status(f"Capture stopped. Total data points: {len(self.current_data)}")
+        else:
+            # Start capturing
+            if not self.is_connected():
+                messagebox.showerror("Error", "Please connect to a device first")
+                return
             
-    def start_capture(self):
-        """Start capturing data"""
-        if not self.is_connected():
-            messagebox.showerror("Error", "Please connect to a device first")
-            return
-            
-        self.is_capturing = True
-        self.current_data = []
-        self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
-        self.log_status("Capture started")
-        
-    def stop_capture(self):
-        """Stop capturing data"""
-        self.is_capturing = False
-        self.start_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-        self.log_status(f"Capture stopped. Total data points: {len(self.current_data)}")
+            self.is_capturing = True
+            self.current_data = []
+            self.capture_btn.config(text="Stop Capture", bg="red")
+            self.log_status("Capture started")
         
     def clear_data(self):
         """Clear current data"""
@@ -397,7 +397,9 @@ class GolfSwingAnalyzer:
         self.connection_label.config(text="Status: Connection Lost", foreground="orange")
         
         if self.is_capturing:
-            self.stop_capture()
+            # Stop capturing
+            self.is_capturing = False
+            self.capture_btn.config(text="Start Capture", bg="green")
         
         # Show dialog
         result = messagebox.askyesno(
