@@ -162,7 +162,8 @@ class GolfSwingAnalyzer:
     def refresh_ports(self):
         """Refresh available serial ports"""
         ports = serial.tools.list_ports.comports()
-        port_list = [port.device for port in ports]
+        # Deduplicate by device name while preserving enumeration order.
+        port_list = list(dict.fromkeys(port.device for port in ports))
         self.port_combo['values'] = port_list
         if port_list:
             self.port_combo.current(0)
