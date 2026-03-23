@@ -7,7 +7,74 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
 from mpl_toolkits.mplot3d import Axes3D
-from scipy.spatial.transform import Rotation as R
+
+
+def _normalize_quaternion_wxyz(quat):
+    """Return a normalized quaternion in [w, x, y, z] format."""
+    q = np.asarray(quat, dtype=float)
+    norm = np.linalg.norm(q)
+    if norm < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    return q / norm
+
+
+def _quat_conjugate_wxyz(quat):
+    """Quaternion conjugate for [w, x, y, z]."""
+    w, x, y, z = quat
+    return np.array([w, -x, -y, -z], dtype=float)
+
+
+def _quat_multiply_wxyz(q1, q2):
+    """Hamilton product for quaternions in [w, x, y, z] format."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ], dtype=float)
+
+
+def _rotate_vector_by_quaternion_wxyz(quat, vec):
+    """Rotate a 3D vector by a quaternion in [w, x, y, z] format."""
+    q = _normalize_quaternion_wxyz(quat)
+    v_quat = np.array([0.0, vec[0], vec[1], vec[2]], dtype=float)
+    q_conj = _quat_conjugate_wxyz(q)
+    rotated = _quat_multiply_wxyz(_quat_multiply_wxyz(q, v_quat), q_conj)
+    return rotated[1:]
+
+
+def _quat_delta_rotvec_wxyz(prev_quat, curr_quat):
+    """Compute rotation vector for delta quaternion: curr * inverse(prev)."""
+    q_prev = _normalize_quaternion_wxyz(prev_quat)
+    q_curr = _normalize_quaternion_wxyz(curr_quat)
+    q_diff = _normalize_quaternion_wxyz(_quat_multiply_wxyz(q_curr, _quat_conjugate_wxyz(q_prev)))
+
+    # Keep shortest-path rotation by forcing non-negative scalar part.
+    if q_diff[0] < 0.0:
+        q_diff = -q_diff
+
+    v = q_diff[1:]
+    v_norm = np.linalg.norm(v)
+    if v_norm < 1e-12:
+        return np.zeros(3, dtype=float)
+
+    angle = 2.0 * np.arctan2(v_norm, q_diff[0])
+    axis = v / v_norm
+    return axis * angle
+
+
+def _rotvec_to_quat_wxyz(rotvec):
+    """Convert rotation vector to quaternion [w, x, y, z]."""
+    rv = np.asarray(rotvec, dtype=float)
+    angle = np.linalg.norm(rv)
+    if angle < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    axis = rv / angle
+    half = angle * 0.5
+    s = np.sin(half)
+    return np.array([np.cos(half), axis[0] * s, axis[1] * s, axis[2] * s], dtype=float)
 
 
 class SwingVisualizer:
@@ -41,20 +108,15 @@ class SwingVisualizer:
         
         for i, point in enumerate(self.data):
             # Extract quaternion
-            quat = np.array([point['q0'], point['q1'], point['q2'], point['q3']])
+            quat = _normalize_quaternion_wxyz(np.array([point['q0'], point['q1'], point['q2'], point['q3']]))
             
             # Store orientation
             self.orientations.append(quat)
             
             # Calculate movement direction from rotation change
             if prev_quat is not None:
-                # Get rotation from previous to current orientation
-                r_prev = R.from_quat([prev_quat[1], prev_quat[2], prev_quat[3], prev_quat[0]])
-                r_curr = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
-                
-                # Rotation difference
-                r_diff = r_curr * r_prev.inv()
-                rotvec = r_diff.as_rotvec()
+                # Rotation difference as a rotation vector.
+                rotvec = _quat_delta_rotvec_wxyz(prev_quat, quat)
                 
                 # Use rotation vector magnitude as speed indicator
                 speed = np.linalg.norm(rotvec)
@@ -73,8 +135,7 @@ class SwingVisualizer:
         # Rebuild positions with smoothed data
         position = np.array([0.0, 0.0, 0.0])
         for i, point in enumerate(self.data):
-            quat = np.array([point['q0'], point['q1'], point['q2'], point['q3']])
-            r_curr = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
+            quat = _normalize_quaternion_wxyz(np.array([point['q0'], point['q1'], point['q2'], point['q3']]))
             
             speed = smoothed_speeds[i]
             
@@ -85,12 +146,12 @@ class SwingVisualizer:
                     # Ground frame: X=left/right (target line), Y=up/down, Z=in/out from golfer
                     # At address: Cal Z (face normal) points along target line (User X)
                     # Use face normal as forward direction along X-axis
-                    face_direction = r_curr.apply([0, 0, 1])  # Cal Z = face normal
+                    face_direction = _rotate_vector_by_quaternion_wxyz(quat, [0.0, 0.0, 1.0])  # Cal Z = face normal
                     # Project to user coordinate frame: face_direction becomes X-movement
                     forward = np.array([face_direction[2], face_direction[0], face_direction[1]])
                 else:
                     # Club frame: X=up shaft, Y=toe-heel, Z=face normal
-                    forward = r_curr.apply([1, 0, 0])  # Use shaft direction as forward
+                    forward = _rotate_vector_by_quaternion_wxyz(quat, [1.0, 0.0, 0.0])  # Use shaft direction as forward
                     
                 position = position + forward * speed * 0.05  # Reduced scale factor (was 0.1)
             
@@ -238,8 +299,7 @@ class SwingVisualizer:
         step = max(1, len(self.positions) // 15)
         for i in range(0, len(self.positions), step):
             quat = self.orientations[i]
-            r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
-            forward = r.apply([0, 0, 0.15])
+            forward = _rotate_vector_by_quaternion_wxyz(quat, [0.0, 0.0, 0.15])
             pos = self.positions[i]
             
             ax.arrow(
@@ -290,14 +350,13 @@ if __name__ == "__main__":
         # Simulate a swing motion
         angle = t
         axis = np.array([0.0, 1.0, 0.0])
-        r = R.from_rotvec(angle * axis)
-        quat = r.as_quat()  # [x, y, z, w]
+        quat_wxyz = _rotvec_to_quat_wxyz(angle * axis)
         
         test_data.append({
-            'q0': quat[3],  # w
-            'q1': quat[0],  # x
-            'q2': quat[1],  # y
-            'q3': quat[2],  # z
+            'q0': quat_wxyz[0],  # w
+            'q1': quat_wxyz[1],  # x
+            'q2': quat_wxyz[2],  # y
+            'q3': quat_wxyz[3],  # z
             'timestamp': i * 0.02
         })
     

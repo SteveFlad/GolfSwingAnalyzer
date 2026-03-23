@@ -53,18 +53,6 @@ float beta = 0.3f;  // Filter gain - reduced for smoother output (was 0.5f)
 unsigned long lastUpdate = 0;
 int sampleCount = 0;
 
-// Gyro bias compensation and rest detection
-float gyroBiasX = 0.0f;
-float gyroBiasY = 0.0f;
-float gyroBiasZ = 0.0f;
-const int GYRO_BIAS_SAMPLES = 300;
-const float ACCEL_STILL_THRESHOLD = 0.25f;    // m/s^2 from 1g magnitude
-const float GYRO_STILL_THRESHOLD = 0.08f;     // rad/s norm threshold for stillness
-const int REST_HOLD_SAMPLES = 12;             // ~180ms at current loop rate
-const float GYRO_DEADBAND_RAD_S = 0.015f;     // zero tiny residual rates at rest
-const float GYRO_BIAS_ADAPT_ALPHA = 0.002f;   // slow bias tracking while still
-int restCounter = 0;
-
 // Calibration mode
 bool calibrationMode = false;
 
@@ -183,39 +171,6 @@ void MadgwickQuaternionUpdate(float ax, float ay, float az, float gx, float gy, 
     q1 *= recipNorm;
     q2 *= recipNorm;
     q3 *= recipNorm;
-}
-
-void calibrateGyroBias() {
-    Serial.println("Calibrating gyro bias (keep club still)...");
-
-    float sumX = 0.0f;
-    float sumY = 0.0f;
-    float sumZ = 0.0f;
-    int validSamples = 0;
-
-    for (int i = 0; i < GYRO_BIAS_SAMPLES; i++) {
-        sensors_event_t accel, gyro, mag, temp;
-        if (icm.getEvent(&accel, &gyro, &temp, &mag)) {
-            sumX += gyro.gyro.x;
-            sumY += gyro.gyro.y;
-            sumZ += gyro.gyro.z;
-            validSamples++;
-        }
-        delay(5);
-    }
-
-    if (validSamples > 0) {
-        gyroBiasX = sumX / validSamples;
-        gyroBiasY = sumY / validSamples;
-        gyroBiasZ = sumZ / validSamples;
-    }
-
-    Serial.print("Gyro bias (rad/s): X=");
-    Serial.print(gyroBiasX, 5);
-    Serial.print(" Y=");
-    Serial.print(gyroBiasY, 5);
-    Serial.print(" Z=");
-    Serial.println(gyroBiasZ, 5);
 }
 
 void setupBLE() {
@@ -357,8 +312,6 @@ void setup() {
         }
         delay(100);
     }
-
-    calibrateGyroBias();
     
     Serial.println("========================================");
     Serial.println("READY! Streaming quaternions...");
@@ -405,14 +358,9 @@ void loop() {
     float az = accel.acceleration.z;
     
     // Get gyroscope data (rad/s)
-    float rawGx = gyro.gyro.x;
-    float rawGy = gyro.gyro.y;
-    float rawGz = gyro.gyro.z;
-
-    // Apply static gyro bias compensation
-    float gx = rawGx - gyroBiasX;
-    float gy = rawGy - gyroBiasY;
-    float gz = rawGz - gyroBiasZ;
+    float gx = gyro.gyro.x;
+    float gy = gyro.gyro.y;
+    float gz = gyro.gyro.z;
     
     // Check if we got valid data (not all zeros)
     if (ax == 0.0f && ay == 0.0f && az == 0.0f && 
@@ -421,42 +369,13 @@ void loop() {
         delay(10);
         return;
     }
-
-    // Detect whether the club is still, then suppress tiny gyro rates at rest.
-    float accelNorm = sqrt(ax * ax + ay * ay + az * az);
-    float accelError = fabs(accelNorm - 9.81f);
-    float gyroNorm = sqrt(gx * gx + gy * gy + gz * gz);
-    bool stillNow = (accelError < ACCEL_STILL_THRESHOLD) && (gyroNorm < GYRO_STILL_THRESHOLD);
-
-    if (stillNow) {
-        if (restCounter < REST_HOLD_SAMPLES) {
-            restCounter++;
-        }
-
-        // Slowly adapt bias during confirmed rest to track temperature drift.
-        if (restCounter >= REST_HOLD_SAMPLES) {
-            gyroBiasX = (1.0f - GYRO_BIAS_ADAPT_ALPHA) * gyroBiasX + GYRO_BIAS_ADAPT_ALPHA * rawGx;
-            gyroBiasY = (1.0f - GYRO_BIAS_ADAPT_ALPHA) * gyroBiasY + GYRO_BIAS_ADAPT_ALPHA * rawGy;
-            gyroBiasZ = (1.0f - GYRO_BIAS_ADAPT_ALPHA) * gyroBiasZ + GYRO_BIAS_ADAPT_ALPHA * rawGz;
-
-            gx = rawGx - gyroBiasX;
-            gy = rawGy - gyroBiasY;
-            gz = rawGz - gyroBiasZ;
-
-            if (fabs(gx) < GYRO_DEADBAND_RAD_S) gx = 0.0f;
-            if (fabs(gy) < GYRO_DEADBAND_RAD_S) gy = 0.0f;
-            if (fabs(gz) < GYRO_DEADBAND_RAD_S) gz = 0.0f;
-        }
-    } else {
-        restCounter = 0;
-    }
     
     if (calibrationMode) {
         // In calibration mode, send raw sensor data
         char message[150];
         snprintf(message, sizeof(message), 
                 "RAW AX:%.4f AY:%.4f AZ:%.4f GX:%.4f GY:%.4f GZ:%.4f", 
-                ax, ay, az, rawGx, rawGy, rawGz);
+                ax, ay, az, gx, gy, gz);
         
         Serial.println(message);
         

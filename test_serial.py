@@ -8,16 +8,14 @@ import serial.tools.list_ports
 import sys
 
 def list_ports():
-    """List all available serial ports (excludes virtual Bluetooth ports)"""
+    """List all available serial ports"""
     ports = serial.tools.list_ports.comports()
-    # Filter out virtual Bluetooth COM ports (Windows creates these for legacy Bluetooth)
-    filtered_ports = [p for p in ports if "Standard Serial over Bluetooth" not in p.description]
     print("\nAvailable Serial Ports:")
     print("-" * 50)
-    for i, port in enumerate(filtered_ports):
+    for i, port in enumerate(ports):
         print(f"{i+1}. {port.device} - {port.description}")
     print("-" * 50)
-    return [port.device for port in filtered_ports]
+    return [port.device for port in ports]
 
 def monitor_serial(port, baudrate=115200):
     """Monitor serial port and print all incoming data"""

@@ -1,5 +1,10 @@
 {
-    "python.defaultInterpreterPath": "C:\\Users\\maryf\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
     "python.terminal.activateEnvironment": false,
-    "C_Cpp.default.configurationProvider": "platformio.platformio-ide"
+    "python-envs.pythonProjects": [
+        {
+            "path": ".",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
 }

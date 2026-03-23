@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import serial.tools.list_ports
 
@@ -23,7 +24,6 @@ except ImportError:
     BLECapture = None
     scan_ble_devices_sync = None
     BLUETOOTH_TYPE = None
-from visualizer import SwingVisualizer
 from sensor_calibration import SensorCalibration
 from calibration_wizard import CalibrationWizard
 
@@ -78,12 +78,21 @@ class GolfSwingAnalyzer:
         
         # Capture Controls
         ttk.Label(control_frame, text="Capture:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        self.capture_btn = tk.Button(control_frame, text="Start Capture", command=self.toggle_capture,
-                         bg="green", fg="white", font=("Arial", 10, "bold"),
-                         padx=10, pady=5)
-        self.capture_btn.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
-        
-        ttk.Button(control_frame, text="Clear Data", command=self.clear_data).grid(row=2, column=3, padx=5, pady=5)
+        capture_font = tkfont.nametofont("TkDefaultFont").copy()
+        capture_font.configure(size=int(capture_font.cget("size") * 1.5))
+        self.capture_btn = tk.Button(
+            control_frame,
+            text="Start Capture",
+            command=self.toggle_capture,
+            font=capture_font,
+            padx=12,
+            pady=6
+        )
+        self.capture_btn.grid(row=2, column=1, padx=5, pady=5)
+        self._set_capture_button_state(is_capturing=False)
+        self._set_capture_button_enabled(False)
+
+        ttk.Button(control_frame, text="Clear Data", command=self.clear_data).grid(row=2, column=2, padx=5, pady=5)
         
         # File Controls
         file_frame = ttk.LabelFrame(self.root, text="File Management", padding=10)
@@ -153,9 +162,7 @@ class GolfSwingAnalyzer:
     def refresh_ports(self):
         """Refresh available serial ports"""
         ports = serial.tools.list_ports.comports()
-        # Filter out virtual Bluetooth COM ports (Windows creates these for legacy Bluetooth)
-        filtered_ports = [p for p in ports if "Standard Serial over Bluetooth" not in p.description]
-        port_list = [port.device for port in filtered_ports]
+        port_list = [port.device for port in ports]
         self.port_combo['values'] = port_list
         if port_list:
             self.port_combo.current(0)
@@ -232,6 +239,7 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text=f"Status: Connected to {port} (USB)", foreground="green")
             self.connect_btn.config(text="Disconnect")
             self.log_status(f"Connected to {port} via USB/Serial")
+            self._set_capture_button_enabled(True)
             self.start_monitoring()
         except Exception as e:
             messagebox.showerror("Connection Error", str(e))
@@ -266,6 +274,7 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text=f"Status: Connected via BLE", foreground="green")
             self.connect_btn.config(text="Disconnect")
             self.log_status(f"Connected to {device_addr} via BLE")
+            self._set_capture_button_enabled(True)
             self.start_monitoring()
         except Exception as e:
             messagebox.showerror("BLE Error", str(e))
@@ -281,6 +290,7 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
             self.log_status("Disconnected from USB/Serial")
+            self._set_capture_button_enabled(False)
     
     def disconnect_bluetooth(self):
         """Disconnect from BLE"""
@@ -292,24 +302,58 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
             self.log_status("Disconnected from BLE")
-    
-    def toggle_capture(self):
-        """Toggle capture on/off"""
-        if self.is_capturing:
-            # Stop capturing
-            self.is_capturing = False
-            self.capture_btn.config(text="Start Capture", bg="green")
-            self.log_status(f"Capture stopped. Total data points: {len(self.current_data)}")
-        else:
-            # Start capturing
-            if not self.is_connected():
-                messagebox.showerror("Error", "Please connect to a device first")
-                return
+            self._set_capture_button_enabled(False)
             
-            self.is_capturing = True
-            self.current_data = []
-            self.capture_btn.config(text="Stop Capture", bg="red")
-            self.log_status("Capture started")
+    def start_capture(self):
+        """Start capturing data"""
+        if not self.is_connected():
+            messagebox.showerror("Error", "Please connect to a device first")
+            return
+            
+        self.is_capturing = True
+        self.current_data = []
+        self._set_capture_button_state(is_capturing=True)
+        self.log_status("Capture started")
+        
+    def stop_capture(self):
+        """Stop capturing data"""
+        self.is_capturing = False
+        self._set_capture_button_state(is_capturing=False)
+        self.log_status(f"Capture stopped. Total data points: {len(self.current_data)}")
+
+    def toggle_capture(self):
+        """Toggle capture start/stop"""
+        if self.is_capturing:
+            self.stop_capture()
+        else:
+            self.start_capture()
+
+    def _set_capture_button_state(self, is_capturing):
+        """Update capture toggle button appearance"""
+        if is_capturing:
+            self.capture_btn.config(
+                text="Stop Capture",
+                bg="#c62828",
+                fg="white",
+                activebackground="#9c0606",
+                activeforeground="white"
+            )
+        else:
+            self.capture_btn.config(
+                text="Start Capture",
+                bg="#2e7d32",
+                fg="white",
+                activebackground="#1b5e20",
+                activeforeground="white"
+            )
+
+    def _set_capture_button_enabled(self, enabled):
+        """Enable or disable the capture toggle button"""
+        if enabled:
+            self.capture_btn.config(state="normal")
+            self._set_capture_button_state(self.is_capturing)
+        else:
+            self.capture_btn.config(state="disabled", bg="#9e9e9e", fg="white")
         
     def clear_data(self):
         """Clear current data"""
@@ -395,11 +439,10 @@ class GolfSwingAnalyzer:
         """Handle connection lost in main thread"""
         self.log_status(f"CONNECTION LOST: {reason}")
         self.connection_label.config(text="Status: Connection Lost", foreground="orange")
+        self._set_capture_button_enabled(False)
         
         if self.is_capturing:
-            # Stop capturing
-            self.is_capturing = False
-            self.capture_btn.config(text="Start Capture", bg="green")
+            self.stop_capture()
         
         # Show dialog
         result = messagebox.askyesno(
@@ -513,6 +556,7 @@ class GolfSwingAnalyzer:
             return
             
         try:
+            from visualizer import SwingVisualizer
             # Use 'ground' coordinate system: X=left/right (target line), Y=up/down, Z=in/out
             visualizer = SwingVisualizer(self.current_data, coordinate_system='ground')
             visualizer.show()
