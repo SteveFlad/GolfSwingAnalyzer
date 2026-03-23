@@ -4,6 +4,10 @@
 .vscode/launch.json
 .vscode/ipch
 
+# Local runtime data
+calibration_data.json
+data/ClubHeadData.json
+
 # Python virtual environments
 .venv/
 .venv-new/
