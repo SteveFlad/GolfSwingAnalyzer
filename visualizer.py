@@ -78,7 +78,7 @@ def _rotvec_to_quat_wxyz(rotvec):
 
 
 class SwingVisualizer:
-    def __init__(self, data, coordinate_system='ground'):
+    def __init__(self, data, coordinate_system='ground', deadband_deg=0.10):
         """
         Initialize visualizer with quaternion data
         
@@ -88,12 +88,16 @@ class SwingVisualizer:
         coordinate_system: str
             'ground' - X=left/right (target line), Y=up/down, Z=in/out (toward/away from golfer) (default)
             'club' - X=up shaft, Y=toe-heel, Z=face normal
+        deadband_deg: float
+            Minimum per-sample angular change to treat as motion.
         """
         self.data = data
         self.positions = []
         self.velocities = []
         self.orientations = []
         self.coordinate_system = coordinate_system
+        self.deadband_deg = max(0.0, float(deadband_deg))
+        self.deadband_rad = np.deg2rad(self.deadband_deg)
         
         self.process_data()
         
@@ -120,6 +124,8 @@ class SwingVisualizer:
                 
                 # Use rotation vector magnitude as speed indicator
                 speed = np.linalg.norm(rotvec)
+                if speed < self.deadband_rad:
+                    speed = 0.0
                 raw_speeds.append(speed)
             else:
                 raw_speeds.append(0.0)

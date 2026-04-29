@@ -7,6 +7,7 @@ import sys
 import threading
 import json
 import time
+import math
 from datetime import datetime
 
 import tkinter as tk
@@ -42,11 +43,24 @@ class GolfSwingAnalyzer:
         self.monitor_thread = None
         self.monitoring = False
         self.bt_devices = []
+        self.settings_file = 'app_settings.json'
+        self._save_settings_after_id = None
+        self.filtered_prev_quat = None
+        self.deadband_profiles = {
+            "Off": 0.0,
+            "Low": 0.05,
+            "Balanced": 0.10,
+            "Strong": 0.20,
+            "Custom": 0.10,
+        }
+        self.deadband_profile_var = tk.StringVar(value="Balanced")
+        self.deadband_var = tk.DoubleVar(value=self.deadband_profiles["Balanced"])
         
         # Initialize sensor calibration
         self.calibration = SensorCalibration('calibration_data.json')
         
         self.setup_ui()
+        self.load_settings()
         self.refresh_ports()
         
     def setup_ui(self):
@@ -93,6 +107,35 @@ class GolfSwingAnalyzer:
         self._set_capture_button_enabled(False)
 
         ttk.Button(control_frame, text="Clear Data", command=self.clear_data).grid(row=2, column=2, padx=5, pady=5)
+
+        # Live noise filter controls
+        ttk.Label(control_frame, text="Noise Filter:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.deadband_profile_combo = ttk.Combobox(
+            control_frame,
+            textvariable=self.deadband_profile_var,
+            values=list(self.deadband_profiles.keys()),
+            width=12,
+            state="readonly",
+        )
+        self.deadband_profile_combo.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        self.deadband_profile_combo.bind("<<ComboboxSelected>>", self.on_deadband_profile_changed)
+
+        self.deadband_slider = ttk.Scale(
+            control_frame,
+            from_=0.0,
+            to=0.5,
+            variable=self.deadband_var,
+            orient="horizontal",
+            command=self.on_deadband_slider_changed,
+        )
+        self.deadband_slider.grid(row=3, column=2, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        self.deadband_value_label = ttk.Label(control_frame, text="0.10 deg/sample")
+        self.deadband_value_label.grid(row=3, column=4, sticky="w", padx=5, pady=5)
+
+        ttk.Button(control_frame, text="Reset Settings", command=self.reset_settings).grid(
+            row=3, column=5, sticky="w", padx=5, pady=5
+        )
         
         # File Controls
         file_frame = ttk.LabelFrame(self.root, text="File Management", padding=10)
@@ -140,6 +183,157 @@ class GolfSwingAnalyzer:
         
         self.connection_label = ttk.Label(summary_frame, text="Status: Not Connected", foreground="red")
         self.connection_label.pack(side="left", padx=10)
+
+        self.update_deadband_label()
+
+    @staticmethod
+    def _normalize_quat_wxyz(quat):
+        q0, q1, q2, q3 = quat
+        norm = math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3)
+        if norm < 1e-12:
+            return (1.0, 0.0, 0.0, 0.0)
+        return (q0 / norm, q1 / norm, q2 / norm, q3 / norm)
+
+    @staticmethod
+    def _quat_conjugate_wxyz(quat):
+        q0, q1, q2, q3 = quat
+        return (q0, -q1, -q2, -q3)
+
+    @staticmethod
+    def _quat_multiply_wxyz(a, b):
+        aw, ax, ay, az = a
+        bw, bx, by, bz = b
+        return (
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        )
+
+    def _quat_delta_angle_deg(self, prev_quat, curr_quat):
+        q_prev = self._normalize_quat_wxyz(prev_quat)
+        q_curr = self._normalize_quat_wxyz(curr_quat)
+        q_diff = self._quat_multiply_wxyz(q_curr, self._quat_conjugate_wxyz(q_prev))
+        q_diff = self._normalize_quat_wxyz(q_diff)
+        w = max(-1.0, min(1.0, q_diff[0]))
+        return math.degrees(2.0 * math.acos(abs(w)))
+
+    def apply_deadband_filter(self, data_dict):
+        current_quat = self._normalize_quat_wxyz((
+            float(data_dict['q0']),
+            float(data_dict['q1']),
+            float(data_dict['q2']),
+            float(data_dict['q3']),
+        ))
+
+        if self.filtered_prev_quat is None:
+            self.filtered_prev_quat = current_quat
+            data_dict['q0'], data_dict['q1'], data_dict['q2'], data_dict['q3'] = current_quat
+            return
+
+        deadband_deg = float(self.deadband_var.get())
+        delta_deg = self._quat_delta_angle_deg(self.filtered_prev_quat, current_quat)
+
+        if delta_deg < deadband_deg:
+            data_dict['q0'], data_dict['q1'], data_dict['q2'], data_dict['q3'] = self.filtered_prev_quat
+        else:
+            self.filtered_prev_quat = current_quat
+            data_dict['q0'], data_dict['q1'], data_dict['q2'], data_dict['q3'] = current_quat
+
+    def update_deadband_label(self):
+        self.deadband_value_label.config(text=f"{self.deadband_var.get():.2f} deg/sample")
+
+    def on_deadband_profile_changed(self, _event=None):
+        profile = self.deadband_profile_var.get()
+        if profile in self.deadband_profiles:
+            self.deadband_var.set(self.deadband_profiles[profile])
+            self.update_deadband_label()
+            self.log_status(f"Noise filter profile set to {profile} ({self.deadband_var.get():.2f} deg/sample)")
+            self.schedule_save_settings()
+
+    def on_deadband_slider_changed(self, _value=None):
+        slider_value = round(float(self.deadband_var.get()), 2)
+        self.deadband_var.set(slider_value)
+        self.update_deadband_label()
+        current_profile = self.deadband_profile_var.get()
+        if current_profile != "Custom":
+            target = self.deadband_profiles.get(current_profile)
+            if target is None or abs(target - slider_value) > 1e-6:
+                self.deadband_profile_var.set("Custom")
+                self.deadband_profiles["Custom"] = slider_value
+        self.schedule_save_settings()
+
+    def reset_settings(self):
+        """Restore default noise filter settings and save immediately."""
+        default_profile = "Balanced"
+        default_value = 0.10
+        self.deadband_profiles[default_profile] = default_value
+        self.deadband_profiles["Custom"] = default_value
+        self.deadband_profile_var.set(default_profile)
+        self.deadband_var.set(default_value)
+        self.update_deadband_label()
+        self.filtered_prev_quat = None
+
+        if self._save_settings_after_id is not None:
+            self.root.after_cancel(self._save_settings_after_id)
+            self._save_settings_after_id = None
+
+        try:
+            self.save_settings()
+            self.log_status("Settings reset to defaults (Balanced, 0.10 deg/sample)")
+        except Exception as e:
+            self.log_status(f"Settings reset warning: {e}")
+
+    def load_settings(self):
+        """Load persisted UI settings from disk."""
+        try:
+            with open(self.settings_file, 'r') as f:
+                settings = json.load(f)
+
+            profile = settings.get('deadband_profile', 'Balanced')
+            deadband_deg = float(settings.get('deadband_deg', self.deadband_profiles['Balanced']))
+            deadband_deg = min(0.5, max(0.0, deadband_deg))
+
+            if profile not in self.deadband_profiles:
+                profile = 'Custom'
+
+            self.deadband_var.set(deadband_deg)
+
+            # Keep presets in sync if a known profile has changed value from file.
+            if profile != 'Custom':
+                self.deadband_profiles[profile] = deadband_deg
+            else:
+                self.deadband_profiles['Custom'] = deadband_deg
+
+            self.deadband_profile_var.set(profile)
+            self.update_deadband_label()
+            self.log_status(f"Loaded settings: {profile} ({deadband_deg:.2f} deg/sample)")
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            self.log_status(f"Settings load warning: {e}")
+
+    def save_settings(self):
+        """Persist UI settings to disk."""
+        settings = {
+            'deadband_profile': self.deadband_profile_var.get(),
+            'deadband_deg': round(float(self.deadband_var.get()), 2),
+        }
+        with open(self.settings_file, 'w') as f:
+            json.dump(settings, f, indent=2)
+
+    def schedule_save_settings(self):
+        """Debounce settings writes while the slider is being dragged."""
+        if self._save_settings_after_id is not None:
+            self.root.after_cancel(self._save_settings_after_id)
+        self._save_settings_after_id = self.root.after(250, self._save_settings_safe)
+
+    def _save_settings_safe(self):
+        self._save_settings_after_id = None
+        try:
+            self.save_settings()
+        except Exception as e:
+            self.log_status(f"Settings save warning: {e}")
         
     def update_connection_ui(self):
         """Update UI based on selected connection type"""
@@ -236,6 +430,7 @@ class GolfSwingAnalyzer:
         try:
             self.serial_capture = SerialCapture(port, 115200, self.on_data_received, self.on_connection_lost)
             self.serial_capture.start()
+            self.filtered_prev_quat = None
             self.connection_type = "serial"
             self.connection_label.config(text=f"Status: Connected to {port} (USB)", foreground="green")
             self.connect_btn.config(text="Disconnect")
@@ -271,6 +466,7 @@ class GolfSwingAnalyzer:
                 connection_lost_callback=self.on_connection_lost
             )
             self.bluetooth_capture.start()
+            self.filtered_prev_quat = None
             self.connection_type = "bluetooth"
             self.connection_label.config(text=f"Status: Connected via BLE", foreground="green")
             self.connect_btn.config(text="Disconnect")
@@ -287,6 +483,7 @@ class GolfSwingAnalyzer:
         if self.serial_capture:
             self.serial_capture.stop()
             self.serial_capture = None
+            self.filtered_prev_quat = None
             self.connection_type = None
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
@@ -299,6 +496,7 @@ class GolfSwingAnalyzer:
         if self.bluetooth_capture:
             self.bluetooth_capture.stop()
             self.bluetooth_capture = None
+            self.filtered_prev_quat = None
             self.connection_type = None
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
@@ -313,6 +511,7 @@ class GolfSwingAnalyzer:
             
         self.is_capturing = True
         self.current_data = []
+        self.filtered_prev_quat = None
         self._set_capture_button_state(is_capturing=True)
         self.log_status("Capture started")
         
@@ -359,6 +558,7 @@ class GolfSwingAnalyzer:
     def clear_data(self):
         """Clear current data"""
         self.current_data = []
+        self.filtered_prev_quat = None
         self.update_data_count()
         self.log_status("Data cleared")
         
@@ -409,6 +609,13 @@ class GolfSwingAnalyzer:
                 data_dict['gyro_calibrated'] = gyro_calibrated.tolist()
             except Exception as e:
                 pass  # Ignore calibration errors
+
+        # Apply live quaternion deadband filtering to suppress idle jitter.
+        try:
+            self.apply_deadband_filter(data_dict)
+            q0, q1, q2, q3 = data_dict['q0'], data_dict['q1'], data_dict['q2'], data_dict['q3']
+        except Exception:
+            pass
         
         # Log periodically to show data is coming in
         if self._data_received_count % 20 == 1:
@@ -544,6 +751,7 @@ class GolfSwingAnalyzer:
                 with open(filename, 'r') as f:
                     loaded = json.load(f)
                     self.current_data = loaded['data']
+                    self.filtered_prev_quat = None
                     self.update_data_count()
                     self.log_status(f"Loaded {len(self.current_data)} data points from {filename}")
                     messagebox.showinfo("Success", f"Loaded {len(self.current_data)} data points")
@@ -559,7 +767,11 @@ class GolfSwingAnalyzer:
         try:
             from visualizer import SwingVisualizer
             # Use 'ground' coordinate system: X=left/right (target line), Y=up/down, Z=in/out
-            visualizer = SwingVisualizer(self.current_data, coordinate_system='ground')
+            visualizer = SwingVisualizer(
+                self.current_data,
+                coordinate_system='ground',
+                deadband_deg=float(self.deadband_var.get())
+            )
             visualizer.show()
         except Exception as e:
             messagebox.showerror("Visualization Error", str(e))
@@ -601,6 +813,10 @@ class GolfSwingAnalyzer:
     
     def on_closing(self):
         """Handle window closing"""
+        try:
+            self.save_settings()
+        except Exception:
+            pass
         if self.serial_capture:
             self.serial_capture.stop()
         self.root.destroy()

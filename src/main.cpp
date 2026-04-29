@@ -53,6 +53,12 @@ float beta = 0.3f;  // Filter gain - reduced for smoother output (was 0.5f)
 unsigned long lastUpdate = 0;
 int sampleCount = 0;
 
+// Stationary drift suppression configuration
+float gyroBiasX = 0.0f, gyroBiasY = 0.0f, gyroBiasZ = 0.0f;
+const float GYRO_DEADBAND_RAD_S = 0.02f;      // ~1.15 deg/s
+const float STATIONARY_ACCEL_TOL_MS2 = 0.35f; // Accel magnitude must be near 1g
+const float GRAVITY_MS2 = 9.80665f;
+
 // Calibration mode
 bool calibrationMode = false;
 
@@ -102,6 +108,39 @@ void blinkLED(int times, int delayMs = 100) {
         digitalWrite(LED_PIN, LOW);
         delay(delayMs);
     }
+}
+
+void calibrateGyroBias(int samples = 200) {
+    float sumX = 0.0f;
+    float sumY = 0.0f;
+    float sumZ = 0.0f;
+    int validSamples = 0;
+
+    Serial.println("Calibrating gyro bias... keep club still");
+
+    for (int i = 0; i < samples; i++) {
+        sensors_event_t accel, gyro, mag, temp;
+        if (icm.getEvent(&accel, &gyro, &temp, &mag)) {
+            sumX += gyro.gyro.x;
+            sumY += gyro.gyro.y;
+            sumZ += gyro.gyro.z;
+            validSamples++;
+        }
+        delay(5);
+    }
+
+    if (validSamples > 0) {
+        gyroBiasX = sumX / validSamples;
+        gyroBiasY = sumY / validSamples;
+        gyroBiasZ = sumZ / validSamples;
+    }
+
+    Serial.print("Gyro bias (rad/s): ");
+    Serial.print(gyroBiasX, 5);
+    Serial.print(", ");
+    Serial.print(gyroBiasY, 5);
+    Serial.print(", ");
+    Serial.println(gyroBiasZ, 5);
 }
 
 // Madgwick AHRS algorithm update (6DOF - no magnetometer)
@@ -317,6 +356,8 @@ void setup() {
     Serial.println("READY! Streaming quaternions...");
     Serial.println("Format: Q0:w Q1:x Q2:y Q3:z");
     Serial.println("========================================");
+
+    calibrateGyroBias(250);
     
     digitalWrite(LED_PIN, HIGH);
     lastUpdate = millis();
@@ -357,10 +398,10 @@ void loop() {
     float ay = accel.acceleration.y;
     float az = accel.acceleration.z;
     
-    // Get gyroscope data (rad/s)
-    float gx = gyro.gyro.x;
-    float gy = gyro.gyro.y;
-    float gz = gyro.gyro.z;
+    // Get gyroscope data (rad/s) and remove startup bias
+    float gx = gyro.gyro.x - gyroBiasX;
+    float gy = gyro.gyro.y - gyroBiasY;
+    float gz = gyro.gyro.z - gyroBiasZ;
     
     // Check if we got valid data (not all zeros)
     if (ax == 0.0f && ay == 0.0f && az == 0.0f && 
@@ -368,6 +409,16 @@ void loop() {
         // All zeros - bad read, skip this sample
         delay(10);
         return;
+    }
+
+    // Suppress tiny angular noise when the club is stationary.
+    float gyroMagnitude = sqrt(gx * gx + gy * gy + gz * gz);
+    float accelMagnitude = sqrt(ax * ax + ay * ay + az * az);
+    bool accelLooksStationary = fabsf(accelMagnitude - GRAVITY_MS2) < STATIONARY_ACCEL_TOL_MS2;
+    if (gyroMagnitude < GYRO_DEADBAND_RAD_S && accelLooksStationary) {
+        gx = 0.0f;
+        gy = 0.0f;
+        gz = 0.0f;
     }
     
     if (calibrationMode) {
