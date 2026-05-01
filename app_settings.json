@@ -1,4 +1,4 @@
 {
-  "deadband_profile": "Balanced",
-  "deadband_deg": 0.1
+  "deadband_profile": "Custom",
+  "deadband_deg": 0.2
 }

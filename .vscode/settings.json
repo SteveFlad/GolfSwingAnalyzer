@@ -1,10 +1,18 @@
 {
-    "python.terminal.activateEnvironment": false,
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "python.terminal.activateEnvironment": true,
     "python-envs.pythonProjects": [
         {
             "path": ".",
             "envManager": "ms-python.python:venv",
             "packageManager": "ms-python.python:pip"
         }
-    ]
+    ],
+    "isort.check": false,
+    "editor.formatOnSave": false,
+    "[python]": {
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "never"
+        }
+    }
 }

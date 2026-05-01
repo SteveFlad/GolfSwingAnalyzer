@@ -13,7 +13,7 @@ from datetime import datetime
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
-import serial.tools.list_ports
+from serial.tools import list_ports
 
 from serial_capture import SerialCapture
 try:
@@ -355,7 +355,7 @@ class GolfSwingAnalyzer:
     
     def refresh_ports(self):
         """Refresh available serial ports"""
-        ports = serial.tools.list_ports.comports()
+        ports = list_ports.comports()
         # Deduplicate by device name while preserving enumeration order.
         port_list = list(dict.fromkeys(port.device for port in ports))
         self.port_combo['values'] = port_list
