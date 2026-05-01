@@ -3,10 +3,11 @@ Serial Communication Module
 Handles reading quaternion data from ESP32 via serial port
 """
 
-import serial
+import re
 import threading
 import time
-import re
+
+import serial
 
 
 class SerialCapture:

@@ -3,10 +3,11 @@ ICM-20948 Sensor Calibration Module
 Handles calibration of sensor orientation for different mounting positions
 """
 
-import numpy as np
 import json
 import time
 from pathlib import Path
+
+import numpy as np
 
 
 class SensorCalibration:

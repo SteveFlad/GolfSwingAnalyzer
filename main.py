@@ -3,21 +3,26 @@ Golf Swing Analyzer - Main Application
 Captures data from ICM-20948 sensor and visualizes 3D golf club path
 """
 
+import json
+import math
 import sys
 import threading
-import json
 import time
-import math
 from datetime import datetime
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, messagebox, filedialog
+from tkinter import filedialog, messagebox, ttk
+
 from serial.tools import list_ports
 
+from calibration_wizard import CalibrationWizard
+from sensor_calibration import SensorCalibration
 from serial_capture import SerialCapture
+
 try:
-    from ble_capture import BLECapture, scan_ble_devices_sync, BLEAK_AVAILABLE
+    from ble_capture import BLEAK_AVAILABLE, BLECapture, scan_ble_devices_sync
+
     BLUETOOTH_AVAILABLE = BLEAK_AVAILABLE
     BLUETOOTH_TYPE = "BLE (Bluetooth Low Energy)" if BLEAK_AVAILABLE else None
 except ImportError:
@@ -25,8 +30,6 @@ except ImportError:
     BLECapture = None
     scan_ble_devices_sync = None
     BLUETOOTH_TYPE = None
-from sensor_calibration import SensorCalibration
-from calibration_wizard import CalibrationWizard
 
 
 class VisualizationFilterDialog:

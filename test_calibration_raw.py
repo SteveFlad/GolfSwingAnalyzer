@@ -1,8 +1,9 @@
 """
 Test script to verify calibration mode and RAW data reception
 """
-import serial
 import time
+
+import serial
 
 # Change this to your COM port
 PORT = "COM4"

@@ -3,9 +3,10 @@ Calibration Wizard Dialog
 Guides user through sensor calibration process
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox
 import time
+import tkinter as tk
+from tkinter import messagebox, ttk
+
 import numpy as np
 
 

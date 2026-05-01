@@ -3,9 +3,10 @@ Simple serial monitor to test if data is coming from the device
 This will print everything received from the serial port
 """
 
+import sys
+
 import serial
 import serial.tools.list_ports
-import sys
 
 def list_ports():
     """List all available serial ports"""
