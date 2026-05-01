@@ -29,6 +29,144 @@ from sensor_calibration import SensorCalibration
 from calibration_wizard import CalibrationWizard
 
 
+class VisualizationFilterDialog:
+    """Dialog for configuring visualization filters"""
+    
+    def __init__(self, parent, current_deadband=0.10):
+        self.result = None
+        self.top = tk.Toplevel(parent)
+        self.top.title("Visualization Filter Settings")
+        self.top.geometry("550x650")  # Increased height to show buttons
+        self.top.resizable(True, True)  # Allow resizing if needed
+        self.top.transient(parent)
+        
+        # Center the dialog
+        self.top.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (self.top.winfo_width() // 2)
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - (self.top.winfo_height() // 2)
+        self.top.geometry(f"+{x}+{y}")
+        
+        # Grab focus after positioning
+        self.top.grab_set()
+        self.top.focus_force()
+        
+        # Main frame
+        main_frame = ttk.Frame(self.top, padding=20)
+        main_frame.pack(fill="both", expand=True)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Configure Visualization Filters", 
+                               font=("TkDefaultFont", 12, "bold"))
+        title_label.pack(pady=(0, 15))
+        
+        # Deadband (read from current settings)
+        deadband_frame = ttk.LabelFrame(main_frame, text="Motion Deadband", padding=10)
+        deadband_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(deadband_frame, text="Minimum rotation per sample (deg):").pack(anchor="w")
+        self.deadband_var = tk.DoubleVar(value=current_deadband)
+        deadband_slider = ttk.Scale(deadband_frame, from_=0.0, to=1.0, 
+                                   variable=self.deadband_var, orient="horizontal")
+        deadband_slider.pack(fill="x", pady=5)
+        self.deadband_label = ttk.Label(deadband_frame, text=f"{current_deadband:.2f}°")
+        self.deadband_label.pack()
+        deadband_slider.config(command=self._update_deadband_label)
+        
+        # Smoothing Window
+        smooth_frame = ttk.LabelFrame(main_frame, text="Smoothing Filter", padding=10)
+        smooth_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(smooth_frame, text="Smoothing window size (samples):").pack(anchor="w")
+        self.smooth_var = tk.IntVar(value=5)
+        smooth_slider = ttk.Scale(smooth_frame, from_=1, to=20, 
+                                 variable=self.smooth_var, orient="horizontal")
+        smooth_slider.pack(fill="x", pady=5)
+        self.smooth_label = ttk.Label(smooth_frame, text="5 samples")
+        self.smooth_label.pack()
+        smooth_slider.config(command=self._update_smooth_label)
+        
+        # Filter Type
+        filter_frame = ttk.LabelFrame(main_frame, text="Filter Type", padding=10)
+        filter_frame.pack(fill="x", pady=5)
+        
+        self.filter_type_var = tk.StringVar(value="moving_average")
+        ttk.Radiobutton(filter_frame, text="Moving Average (Fast)", 
+                       variable=self.filter_type_var, value="moving_average").pack(anchor="w")
+        ttk.Radiobutton(filter_frame, text="Savitzky-Golay (Better peak preservation)", 
+                       variable=self.filter_type_var, value="savgol").pack(anchor="w")
+        ttk.Radiobutton(filter_frame, text="None (Raw data)", 
+                       variable=self.filter_type_var, value="none").pack(anchor="w")
+        
+        # Noise Floor
+        noise_frame = ttk.LabelFrame(main_frame, text="Noise Floor", padding=10)
+        noise_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(noise_frame, text="Ignore slowest movements (%):").pack(anchor="w")
+        self.noise_var = tk.DoubleVar(value=25.0)
+        noise_slider = ttk.Scale(noise_frame, from_=0, to=50, 
+                                variable=self.noise_var, orient="horizontal")
+        noise_slider.pack(fill="x", pady=5)
+        self.noise_label = ttk.Label(noise_frame, text="25%")
+        self.noise_label.pack()
+        noise_slider.config(command=self._update_noise_label)
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(pady=(15, 0), fill="x")
+        
+        # Add label above buttons
+        ttk.Label(button_frame, text="Click a button to proceed:", 
+                 font=("TkDefaultFont", 9, "italic")).pack(pady=(0, 10))
+        
+        # Button container for horizontal layout
+        btn_container = ttk.Frame(button_frame)
+        btn_container.pack()
+        
+        # Try regular tk.Button with colors for visibility
+        visualize_btn = tk.Button(btn_container, text="Visualize", command=self._on_ok, 
+                                  width=15, bg="#4CAF50", fg="white", font=("TkDefaultFont", 10, "bold"))
+        visualize_btn.pack(side="left", padx=5)
+        
+        cancel_btn = tk.Button(btn_container, text="Cancel", command=self._on_cancel, 
+                               width=15, bg="#f44336", fg="white", font=("TkDefaultFont", 10, "bold"))
+        cancel_btn.pack(side="left", padx=5)
+        
+        # Force update to ensure buttons are rendered
+        self.top.update_idletasks()
+        
+        # Handle window close button (X)
+        self.top.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        
+        # Bind Enter and Escape keys
+        self.top.bind("<Return>", lambda e: self._on_ok())
+        self.top.bind("<Escape>", lambda e: self._on_cancel())
+        
+    def _update_deadband_label(self, *args):
+        val = self.deadband_var.get()
+        self.deadband_label.config(text=f"{val:.2f}°")
+        
+    def _update_smooth_label(self, *args):
+        val = int(self.smooth_var.get())
+        self.smooth_label.config(text=f"{val} samples")
+        
+    def _update_noise_label(self, *args):
+        val = self.noise_var.get()
+        self.noise_label.config(text=f"{val:.0f}%")
+        
+    def _on_ok(self):
+        self.result = {
+            'deadband_deg': self.deadband_var.get(),
+            'smoothing_window': int(self.smooth_var.get()),
+            'noise_floor': self.noise_var.get(),
+            'filter_type': self.filter_type_var.get()
+        }
+        self.top.destroy()
+        
+    def _on_cancel(self):
+        self.result = None
+        self.top.destroy()
+
+
 class GolfSwingAnalyzer:
     def __init__(self, root):
         self.root = root
@@ -40,6 +178,7 @@ class GolfSwingAnalyzer:
         self.connection_type = None  # 'serial' or 'bluetooth'
         self.is_capturing = False
         self.current_data = []
+        self.current_filename = None  # Track the current data filename
         self.monitor_thread = None
         self.monitoring = False
         self.bt_devices = []
@@ -511,6 +650,7 @@ class GolfSwingAnalyzer:
             
         self.is_capturing = True
         self.current_data = []
+        self.current_filename = f"Live Capture {datetime.now().strftime('%Y-%m-%d %H-%M-%S')}"
         self.filtered_prev_quat = None
         self._set_capture_button_state(is_capturing=True)
         self.log_status("Capture started")
@@ -558,6 +698,7 @@ class GolfSwingAnalyzer:
     def clear_data(self):
         """Clear current data"""
         self.current_data = []
+        self.current_filename = None
         self.filtered_prev_quat = None
         self.update_data_count()
         self.log_status("Data cleared")
@@ -635,9 +776,14 @@ class GolfSwingAnalyzer:
         
     def log_status(self, message):
         """Log message to status display"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.status_text.insert("end", f"[{timestamp}] {message}\n")
-        self.status_text.see("end")
+        try:
+            if self.status_text.winfo_exists():
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self.status_text.insert("end", f"[{timestamp}] {message}\n")
+                self.status_text.see("end")
+        except (tk.TclError, AttributeError):
+            # Widget destroyed or doesn't exist - ignore
+            pass
     
     def on_connection_lost(self, reason):
         """Callback when connection is lost"""
@@ -734,6 +880,7 @@ class GolfSwingAnalyzer:
                         'data_points': len(self.current_data),
                         'data': self.current_data
                     }, f, indent=2)
+                self.current_filename = filename  # Store the filename
                 self.log_status(f"Data saved to {filename}")
                 messagebox.showinfo("Success", "Data saved successfully")
             except Exception as e:
@@ -751,6 +898,7 @@ class GolfSwingAnalyzer:
                 with open(filename, 'r') as f:
                     loaded = json.load(f)
                     self.current_data = loaded['data']
+                    self.current_filename = filename  # Store the filename
                     self.filtered_prev_quat = None
                     self.update_data_count()
                     self.log_status(f"Loaded {len(self.current_data)} data points from {filename}")
@@ -763,19 +911,65 @@ class GolfSwingAnalyzer:
         if not self.current_data:
             messagebox.showwarning("Warning", "No data to visualize")
             return
+        
+        # Show filter configuration dialog
+        self.log_status("Opening filter settings dialog...")
+        dialog = VisualizationFilterDialog(self.root, float(self.deadband_var.get()))
+        self.root.wait_window(dialog.top)
+        
+        if dialog.result is None:
+            self.log_status("Visualization cancelled by user")
+            return  # User cancelled
             
         try:
             from visualizer import SwingVisualizer
+            # Log the filter settings being applied
+            self.log_status(f"Visualizing with filters: {dialog.result['filter_type']}, "
+                          f"window={dialog.result['smoothing_window']}, "
+                          f"deadband={dialog.result['deadband_deg']:.2f}°, "
+                          f"noise_floor={dialog.result['noise_floor']:.0f}%")
+            
+            # Temporarily minimize main window so visualization appears on top
+            self.root.iconify()
+            
             # Use 'ground' coordinate system: X=left/right (target line), Y=up/down, Z=in/out
             visualizer = SwingVisualizer(
                 self.current_data,
                 coordinate_system='ground',
-                deadband_deg=float(self.deadband_var.get())
+                deadband_deg=dialog.result['deadband_deg'],
+                smoothing_window=dialog.result['smoothing_window'],
+                noise_floor_percentile=dialog.result['noise_floor'],
+                filter_type=dialog.result['filter_type'],
+                filename=self.current_filename
             )
+            self.log_status("Showing visualization window...")
+            
+            # Show visualization (this blocks until window is closed)
             visualizer.show()
+            
+            # Restore main window after visualization closes
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            
+            self.log_status("Visualization window closed")
         except Exception as e:
-            messagebox.showerror("Visualization Error", str(e))
-            self.log_status(f"Visualization error: {e}")
+            # Restore main window even if there's an error
+            try:
+                self.root.deiconify()
+                self.root.lift()
+            except:
+                pass
+            
+            import traceback
+            error_msg = f"Visualization error: {str(e)}"
+            try:
+                messagebox.showerror("Visualization Error", str(e))
+            except:
+                pass
+            self.log_status(error_msg)
+            print(f"ERROR: {error_msg}")
+            print(traceback.format_exc())
             
     def start_calibration_wizard(self):
         """Open the calibration wizard"""

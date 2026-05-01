@@ -78,7 +78,9 @@ def _rotvec_to_quat_wxyz(rotvec):
 
 
 class SwingVisualizer:
-    def __init__(self, data, coordinate_system='ground', deadband_deg=0.10):
+    def __init__(self, data, coordinate_system='ground', deadband_deg=0.10, 
+                 smoothing_window=5, noise_floor_percentile=25, filter_type='moving_average',
+                 filename=None):
         """
         Initialize visualizer with quaternion data
         
@@ -90,6 +92,14 @@ class SwingVisualizer:
             'club' - X=up shaft, Y=toe-heel, Z=face normal
         deadband_deg: float
             Minimum per-sample angular change to treat as motion.
+        smoothing_window: int
+            Window size for smoothing filter (3-20 samples)
+        noise_floor_percentile: float
+            Percentile threshold for noise filtering (0-50%)
+        filter_type: str
+            Type of smoothing filter: 'moving_average', 'savgol', or 'none'
+        filename: str or None
+            Optional filename to display in window title
         """
         self.data = data
         self.positions = []
@@ -98,6 +108,10 @@ class SwingVisualizer:
         self.coordinate_system = coordinate_system
         self.deadband_deg = max(0.0, float(deadband_deg))
         self.deadband_rad = np.deg2rad(self.deadband_deg)
+        self.smoothing_window = max(1, min(20, int(smoothing_window)))
+        self.noise_floor_percentile = max(0.0, min(50.0, float(noise_floor_percentile)))
+        self.filter_type = filter_type
+        self.filename = filename
         
         self.process_data()
         
@@ -132,11 +146,26 @@ class SwingVisualizer:
                 
             prev_quat = quat
         
-        # Apply moving average filter to reduce noise (smoothing window of 5 samples)
-        smoothed_speeds = np.convolve(raw_speeds, np.ones(5)/5, mode='same')
+        # Apply smoothing filter to reduce noise
+        if self.filter_type == 'savgol' and len(raw_speeds) >= self.smoothing_window:
+            # Savitzky-Golay filter (preserves peaks better)
+            from scipy.signal import savgol_filter
+            # Ensure window is odd
+            window = self.smoothing_window if self.smoothing_window % 2 == 1 else self.smoothing_window + 1
+            window = min(window, len(raw_speeds))  # Can't be larger than data
+            if window >= 5:  # Need at least 5 points for order 3
+                smoothed_speeds = savgol_filter(raw_speeds, window, 3)
+            else:
+                smoothed_speeds = np.array(raw_speeds)
+        elif self.filter_type == 'moving_average' and self.smoothing_window > 1:
+            # Moving average filter
+            smoothed_speeds = np.convolve(raw_speeds, np.ones(self.smoothing_window)/self.smoothing_window, mode='same')
+        else:
+            # No smoothing
+            smoothed_speeds = np.array(raw_speeds)
         
         # Apply speed threshold - ignore very small rotations (noise floor)
-        speed_threshold = np.percentile(smoothed_speeds, 25)  # Bottom 25% treated as noise
+        speed_threshold = np.percentile(smoothed_speeds, self.noise_floor_percentile)
         
         # Rebuild positions with smoothed data
         position = np.array([0.0, 0.0, 0.0])
@@ -169,9 +198,19 @@ class SwingVisualizer:
         
     def show(self):
         """Display the 3D visualization"""
-        # Create maximized figure
+        # Create maximized figure with filter info in title
+        filter_info = f"Filters: {self.filter_type.replace('_', ' ').title()} | Window: {self.smoothing_window} | Deadband: {self.deadband_deg:.2f}° | Noise Floor: {self.noise_floor_percentile:.0f}%"
+        
+        # Extract just the filename (not full path) if available
+        import os
+        if self.filename:
+            display_name = os.path.basename(self.filename)
+        else:
+            display_name = "Captured Data"
+        
         fig = plt.figure()
-        fig.canvas.manager.window.state('zoomed')  # Maximize window
+        fig.canvas.manager.set_window_title(display_name)
+        fig.suptitle(filter_info, fontsize=10, y=0.995)
         
         # 3D trajectory plot
         ax1 = fig.add_subplot(2, 2, 1, projection='3d')
@@ -190,6 +229,18 @@ class SwingVisualizer:
         self.plot_side_view(ax4)
         
         plt.tight_layout()
+        
+        # Maximize and bring window to front
+        fig.canvas.manager.window.state('zoomed')
+        try:
+            # Try to bring the matplotlib window to the front
+            fig.canvas.manager.window.lift()
+            fig.canvas.manager.window.attributes('-topmost', True)
+            fig.canvas.manager.window.after_idle(fig.canvas.manager.window.attributes, '-topmost', False)
+            fig.canvas.manager.window.focus_force()
+        except:
+            pass  # If these methods don't work, just continue
+        
         plt.show()
         
     def plot_trajectory(self, ax):
