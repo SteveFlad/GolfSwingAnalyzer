@@ -356,14 +356,13 @@ class SwingVisualizer:
         step = max(1, len(self.positions) // 15)
         for i in range(0, len(self.positions), step):
             quat = self.orientations[i]
-            forward = _rotate_vector_by_quaternion_wxyz(quat, [0.0, 0.0, 0.15])
+            forward = _rotate_vector_by_quaternion_wxyz(quat, [0.0, 0.0, 0.0167])
             pos = self.positions[i]
             
-            ax.arrow(
-                pos[0], pos[1],
-                forward[0], forward[1],
-                head_width=0.025, head_length=0.025,
-                fc='red', ec='red', alpha=0.5
+            ax.annotate('',
+                xy=(pos[0] + forward[0], pos[1] + forward[1]),
+                xytext=(pos[0], pos[1]),
+                arrowprops=dict(arrowstyle='->', color='red', lw=1, alpha=0.5)
             )
         
         ax.set_xlabel('X (m)')
