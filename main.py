@@ -35,7 +35,8 @@ except ImportError:
 class VisualizationFilterDialog:
     """Dialog for configuring visualization filters"""
     
-    def __init__(self, parent, current_deadband=0.10):
+    def __init__(self, parent, current_deadband=0.10, smoothing_window=5, 
+                 noise_floor=25.0, filter_type='moving_average'):
         self.result = None
         self.top = tk.Toplevel(parent)
         self.top.title("Visualization Filter Settings")
@@ -80,11 +81,11 @@ class VisualizationFilterDialog:
         smooth_frame.pack(fill="x", pady=5)
         
         ttk.Label(smooth_frame, text="Smoothing window size (samples):").pack(anchor="w")
-        self.smooth_var = tk.IntVar(value=5)
+        self.smooth_var = tk.IntVar(value=smoothing_window)
         smooth_slider = ttk.Scale(smooth_frame, from_=1, to=20, 
                                  variable=self.smooth_var, orient="horizontal")
         smooth_slider.pack(fill="x", pady=5)
-        self.smooth_label = ttk.Label(smooth_frame, text="5 samples")
+        self.smooth_label = ttk.Label(smooth_frame, text=f"{smoothing_window} samples")
         self.smooth_label.pack()
         smooth_slider.config(command=self._update_smooth_label)
         
@@ -92,7 +93,7 @@ class VisualizationFilterDialog:
         filter_frame = ttk.LabelFrame(main_frame, text="Filter Type", padding=10)
         filter_frame.pack(fill="x", pady=5)
         
-        self.filter_type_var = tk.StringVar(value="moving_average")
+        self.filter_type_var = tk.StringVar(value=filter_type)
         ttk.Radiobutton(filter_frame, text="Moving Average (Fast)", 
                        variable=self.filter_type_var, value="moving_average").pack(anchor="w")
         ttk.Radiobutton(filter_frame, text="Savitzky-Golay (Better peak preservation)", 
@@ -105,11 +106,11 @@ class VisualizationFilterDialog:
         noise_frame.pack(fill="x", pady=5)
         
         ttk.Label(noise_frame, text="Ignore slowest movements (%):").pack(anchor="w")
-        self.noise_var = tk.DoubleVar(value=25.0)
+        self.noise_var = tk.DoubleVar(value=noise_floor)
         noise_slider = ttk.Scale(noise_frame, from_=0, to=50, 
                                 variable=self.noise_var, orient="horizontal")
         noise_slider.pack(fill="x", pady=5)
-        self.noise_label = ttk.Label(noise_frame, text="25%")
+        self.noise_label = ttk.Label(noise_frame, text=f"{noise_floor:.0f}%")
         self.noise_label.pack()
         noise_slider.config(command=self._update_noise_label)
         
@@ -197,6 +198,14 @@ class GolfSwingAnalyzer:
         }
         self.deadband_profile_var = tk.StringVar(value="Balanced")
         self.deadband_var = tk.DoubleVar(value=self.deadband_profiles["Balanced"])
+        
+        # Default visualization filter settings
+        self.viz_filter_config = {
+            'deadband_deg': 0.10,
+            'smoothing_window': 5,
+            'noise_floor': 25.0,
+            'filter_type': 'moving_average'
+        }
         
         # Initialize sensor calibration
         self.calibration = SensorCalibration('calibration_data.json')
@@ -881,10 +890,11 @@ class GolfSwingAnalyzer:
                     json.dump({
                         'timestamp': datetime.now().isoformat(),
                         'data_points': len(self.current_data),
+                        'filter_config': self.viz_filter_config,
                         'data': self.current_data
                     }, f, indent=2)
                 self.current_filename = filename  # Store the filename
-                self.log_status(f"Data saved to {filename}")
+                self.log_status(f"Data saved to {filename} with filter configuration")
                 messagebox.showinfo("Success", "Data saved successfully")
             except Exception as e:
                 messagebox.showerror("Save Error", str(e))
@@ -901,6 +911,21 @@ class GolfSwingAnalyzer:
                 with open(filename, 'r') as f:
                     loaded = json.load(f)
                     self.current_data = loaded['data']
+                    
+                    # Load filter configuration if available
+                    if 'filter_config' in loaded:
+                        self.viz_filter_config = loaded['filter_config']
+                        self.log_status(f"Loaded filter config: {self.viz_filter_config['filter_type']}")
+                    else:
+                        # Use defaults for older files
+                        self.viz_filter_config = {
+                            'deadband_deg': 0.10,
+                            'smoothing_window': 5,
+                            'noise_floor': 25.0,
+                            'filter_type': 'moving_average'
+                        }
+                        self.log_status("No filter config in file, using defaults")
+                    
                     self.current_filename = filename  # Store the filename
                     self.filtered_prev_quat = None
                     self.update_data_count()
@@ -915,14 +940,23 @@ class GolfSwingAnalyzer:
             messagebox.showwarning("Warning", "No data to visualize")
             return
         
-        # Show filter configuration dialog
+        # Show filter configuration dialog with saved settings
         self.log_status("Opening filter settings dialog...")
-        dialog = VisualizationFilterDialog(self.root, float(self.deadband_var.get()))
+        dialog = VisualizationFilterDialog(
+            self.root, 
+            current_deadband=self.viz_filter_config['deadband_deg'],
+            smoothing_window=self.viz_filter_config['smoothing_window'],
+            noise_floor=self.viz_filter_config['noise_floor'],
+            filter_type=self.viz_filter_config['filter_type']
+        )
         self.root.wait_window(dialog.top)
         
         if dialog.result is None:
             self.log_status("Visualization cancelled by user")
             return  # User cancelled
+        
+        # Store the filter configuration for future use
+        self.viz_filter_config = dialog.result
             
         try:
             from visualizer import SwingVisualizer
