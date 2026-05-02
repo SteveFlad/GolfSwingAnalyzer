@@ -9,10 +9,15 @@
         }
     ],
     "isort.check": false,
+    "isort.severity": {
+        "W": "Hint",
+        "E": "Hint"
+    },
     "editor.formatOnSave": false,
     "[python]": {
         "editor.codeActionsOnSave": {
             "source.organizeImports": "never"
-        }
+        },
+        "editor.defaultFormatter": "ms-python.python"
     }
 }
