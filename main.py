@@ -216,6 +216,10 @@ class GolfSwingAnalyzer:
         
     def setup_ui(self):
         """Create the user interface"""
+        # Create button font for consistent sizing
+        self.button_font = tkfont.nametofont("TkDefaultFont").copy()
+        self.button_font.configure(size=int(self.button_font.cget("size") * 1.5))
+        
         # Control Frame
         control_frame = ttk.LabelFrame(self.root, text="Controls", padding=10)
         control_frame.pack(fill="x", padx=10, pady=5)
@@ -237,19 +241,18 @@ class GolfSwingAnalyzer:
         self.port_combo = ttk.Combobox(control_frame, textvariable=self.port_var, width=30)
         self.port_combo.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
         
-        ttk.Button(control_frame, text="Scan", command=self.scan_devices).grid(row=1, column=3, padx=5, pady=5)
-        self.connect_btn = ttk.Button(control_frame, text="Connect", command=self.toggle_connection)
+        self.scan_btn = tk.Button(control_frame, text="Scan", command=self.scan_devices, font=self.button_font, padx=12, pady=6)
+        self.scan_btn.grid(row=1, column=3, padx=5, pady=5)
+        self.connect_btn = tk.Button(control_frame, text="Connect", command=self.toggle_connection, font=self.button_font, padx=12, pady=6)
         self.connect_btn.grid(row=1, column=4, padx=5, pady=5)
         
         # Capture Controls
         ttk.Label(control_frame, text="Capture:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        capture_font = tkfont.nametofont("TkDefaultFont").copy()
-        capture_font.configure(size=int(capture_font.cget("size") * 1.5))
         self.capture_btn = tk.Button(
             control_frame,
             text="Start Capture",
             command=self.toggle_capture,
-            font=capture_font,
+            font=self.button_font,
             padx=12,
             pady=6
         )
@@ -257,7 +260,7 @@ class GolfSwingAnalyzer:
         self._set_capture_button_state(is_capturing=False)
         self._set_capture_button_enabled(False)
 
-        ttk.Button(control_frame, text="Clear Data", command=self.clear_data).grid(row=2, column=2, padx=5, pady=5)
+        tk.Button(control_frame, text="Clear Data", command=self.clear_data, font=self.button_font, padx=12, pady=6).grid(row=2, column=2, padx=5, pady=5)
 
         # Live noise filter controls
         ttk.Label(control_frame, text="Noise Filter:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
@@ -284,7 +287,7 @@ class GolfSwingAnalyzer:
         self.deadband_value_label = ttk.Label(control_frame, text="0.10 deg/sample")
         self.deadband_value_label.grid(row=3, column=4, sticky="w", padx=5, pady=5)
 
-        ttk.Button(control_frame, text="Reset Settings", command=self.reset_settings).grid(
+        tk.Button(control_frame, text="Reset Settings", command=self.reset_settings, font=self.button_font, padx=12, pady=6).grid(
             row=3, column=5, sticky="w", padx=5, pady=5
         )
         
@@ -292,16 +295,16 @@ class GolfSwingAnalyzer:
         file_frame = ttk.LabelFrame(self.root, text="File Management", padding=10)
         file_frame.pack(fill="x", padx=10, pady=5)
         
-        ttk.Button(file_frame, text="Save Data", command=self.save_data).pack(side="left", padx=5)
-        ttk.Button(file_frame, text="Load Data", command=self.load_data).pack(side="left", padx=5)
-        ttk.Button(file_frame, text="Visualize 3D", command=self.visualize_3d).pack(side="left", padx=5)
+        tk.Button(file_frame, text="Save Data", command=self.save_data, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
+        tk.Button(file_frame, text="Load Data", command=self.load_data, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
+        tk.Button(file_frame, text="Visualize 3D", command=self.visualize_3d, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
         
         # Calibration Controls
         calib_frame = ttk.LabelFrame(self.root, text="Sensor Calibration", padding=10)
         calib_frame.pack(fill="x", padx=10, pady=5)
         
-        ttk.Button(calib_frame, text="Calibrate Sensor", command=self.start_calibration_wizard).pack(side="left", padx=5)
-        ttk.Button(calib_frame, text="Reset Calibration", command=self.reset_calibration).pack(side="left", padx=5)
+        tk.Button(calib_frame, text="Calibrate Sensor", command=self.start_calibration_wizard, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
+        tk.Button(calib_frame, text="Reset Calibration", command=self.reset_calibration, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
         
         self.calib_status_label = ttk.Label(calib_frame, text=f"Status: {self.calibration.get_calibration_status()}")
         self.calib_status_label.pack(side="left", padx=10)
