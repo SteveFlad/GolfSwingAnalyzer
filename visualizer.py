@@ -4,6 +4,10 @@ Displays club head path, speed, and face direction
 """
 
 import numpy as np
+
+# Force matplotlib to use GUI backend (not inline for notebooks)
+import matplotlib
+matplotlib.use('TkAgg')  # Use Tk GUI backend for separate window
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 from mpl_toolkits.mplot3d import Axes3D
@@ -419,16 +423,30 @@ class SwingVisualizer:
         
         plt.tight_layout()
         
-        # Maximize and bring window to front
-        fig.canvas.manager.window.state('zoomed')
+        # Maximize and bring window to front (with robust error handling)
         try:
-            # Try to bring the matplotlib window to the front
-            fig.canvas.manager.window.lift()
-            fig.canvas.manager.window.attributes('-topmost', True)
-            fig.canvas.manager.window.after_idle(fig.canvas.manager.window.attributes, '-topmost', False)
-            fig.canvas.manager.window.focus_force()
-        except:
-            pass  # If these methods don't work, just continue
+            # Try different methods to maximize window depending on backend
+            manager = fig.canvas.manager
+            if hasattr(manager, 'window'):
+                # TkAgg backend
+                manager.window.state('zoomed')
+                # Try to bring window to front
+                try:
+                    manager.window.lift()
+                    manager.window.attributes('-topmost', True)
+                    manager.window.after_idle(manager.window.attributes, '-topmost', False)
+                    manager.window.focus_force()
+                except:
+                    pass
+            elif hasattr(manager, 'frame'):
+                # Qt backends
+                manager.frame.showMaximized()
+            elif hasattr(manager, 'full_screen_toggle'):
+                # Some other backends
+                manager.full_screen_toggle()
+        except Exception as e:
+            # If window maximization fails, just continue with default size
+            print(f"Note: Could not maximize window ({e}). Continuing with default size.")
         
         plt.show()
         
@@ -571,9 +589,10 @@ class SwingVisualizer:
             ax.set_zlabel('Toe/Heel (ft)')
             ax.set_title('3D Club Head Trajectory\n(Red arrows = velocity direction)')
         
-        # Set viewing angle to look DOWN at the ground plane
-        # elev=20 looks down from above, azim=-60 gives good 3/4 view
-        ax.view_init(elev=20, azim=-60, roll=0)
+        # Set viewing angle from DOWN THE TARGET LINE (face-on to golfer)
+        # elev=15 slight downward view from eye level
+        # azim=0 view from behind golfer (down the in/out axis), backswing right, downswing left
+        ax.view_init(elev=15, azim=0, roll=0)
         
         ax.legend(loc='upper left')
         
