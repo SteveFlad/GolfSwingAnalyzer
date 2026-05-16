@@ -3,11 +3,17 @@
 Displays club head path, speed, and face direction
 """
 
+import os
 import numpy as np
+
+# Prevent VS Code from opening Interactive window for matplotlib plots
+os.environ['MPLBACKEND'] = 'TkAgg'
 
 # Force matplotlib to use GUI backend (not inline for notebooks)
 import matplotlib
 matplotlib.use('TkAgg')  # Use Tk GUI backend for separate window
+# Disable interactive mode to prevent VS Code interception
+matplotlib.interactive(False)
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 from mpl_toolkits.mplot3d import Axes3D
@@ -190,35 +196,45 @@ class SwingVisualizer:
             # No smoothing
             smoothed_speeds = np.array(raw_speeds)
         
-        # Build full trajectory by integrating club position through space
-        # Use club length to convert angular motion to linear club head position
+        # Build full trajectory by integrating rotational movement into linear path
+        # Each rotation moves the club head through space - we accumulate these movements
         position = np.array([0.0, 0.0, 0.0])
         prev_quat = None
+        movements_filtered = 0
+        movements_applied = 0
         
         for i, point in enumerate(self.data):
             quat = _normalize_quaternion_wxyz(np.array([point['q0'], point['q1'], point['q2'], point['q3']]))
             speed = smoothed_speeds[i]
             
             if prev_quat is not None:
-                # Calculate rotation vector between samples
+                # Calculate rotation vector between samples (axis-angle representation)
                 rotvec = _quat_delta_rotvec_wxyz(prev_quat, quat)
+                rotation_magnitude = np.linalg.norm(rotvec)
                 
                 # Apply deadband to filter very small movements
-                if np.linalg.norm(rotvec) > self.deadband_rad:
-                    # Get the club head position vector (pointing down the shaft)
-                    # Natural golf coordinates: X=target line, Y=in/out, Z=height
-                    if self.coordinate_system == 'ground':
-                        # Club shaft direction (club_length down the shaft from grip)
-                        club_vector = _rotate_vector_by_quaternion_wxyz(quat, [0.0, 0.0, self.club_length_m])
-                        # Map sensor frame to natural golf coordinates:
-                        # Sensor X → Golf Z (height, INVERTED), Sensor Y → Golf X (target), Sensor Z → Golf Y (in/out)
-                        club_head_pos = np.array([club_vector[1], club_vector[2], -club_vector[0]])
-                    else:
-                        # Club frame: X=up shaft
-                        club_head_pos = _rotate_vector_by_quaternion_wxyz(quat, [self.club_length_m, 0.0, 0.0])
+                if rotation_magnitude > self.deadband_rad:
+                    # Convert rotation to linear displacement of club head
+                    # Rotation axis shows direction of swing, magnitude shows how much
                     
-                    # Update position to club head location
-                    position = club_head_pos
+                    if self.coordinate_system == 'ground':
+                        # Rotate the axis from sensor frame to golf frame
+                        # Sensor X → Golf Z (height, INVERTED), Sensor Y → Golf X (target), Sensor Z → Golf Y (in/out)
+                        rotation_axis = rotvec / rotation_magnitude if rotation_magnitude > 0 else rotvec
+                        golf_axis = np.array([rotation_axis[1], rotation_axis[2], -rotation_axis[0]])
+                        
+                        # Linear displacement = rotation magnitude * club length * rotation axis
+                        # (approximation for small angles, exact for large swings)
+                        delta_position = golf_axis * rotation_magnitude * self.club_length_m
+                    else:
+                        # Club frame: direct rotation vector to displacement
+                        delta_position = rotvec * self.club_length_m
+                    
+                    # INTEGRATE: Add delta to accumulated position to build trajectory
+                    position = position + delta_position
+                    movements_applied += 1
+                else:
+                    movements_filtered += 1
             
             self.velocities.append(speed)
             self.positions.append(position.copy())
@@ -273,12 +289,24 @@ class SwingVisualizer:
         print(f"\n=== Swing Data Analysis (Natural Golf Coordinates) ===")
         print(f"Total samples: {len(self.data)}")
         print(f"Position points: {len(self.positions)}")
+        print(f"Deadband filter: {self.deadband_deg:.2f}° ({np.rad2deg(self.deadband_rad):.2f}°)")
+        print(f"Movements applied: {movements_applied} / Filtered: {movements_filtered}")
         print(f"Max speed: {np.max(self.velocities):.2f} rad/s ({np.max(self.velocities) * self.rad_to_mph:.1f} mph)")
         print(f"Position range - Target Line (X): {np.min(self.positions[:, 0]):.3f} to {np.max(self.positions[:, 0]):.3f} m ({np.ptp(self.positions[:, 0]) * self.m_to_ft:.2f} ft)")
         print(f"Position range - In/Out (Y):      {np.min(self.positions[:, 1]):.3f} to {np.max(self.positions[:, 1]):.3f} m ({np.ptp(self.positions[:, 1]) * self.m_to_ft:.2f} ft)")
         print(f"Position range - Height (Z):      {np.min(self.positions[:, 2]):.3f} to {np.max(self.positions[:, 2]):.3f} m ({np.ptp(self.positions[:, 2]) * self.m_to_ft:.2f} ft)")
         total_distance = np.sum(np.linalg.norm(np.diff(self.positions, axis=0), axis=1))
         print(f"Total path length: {total_distance:.3f} m ({total_distance * self.m_to_ft:.2f} ft)")
+        
+        # Warn if most movements were filtered out
+        total_movements = movements_applied + movements_filtered
+        if total_movements > 0 and movements_filtered / total_movements > 0.95:
+            print(f"\n⚠️  WARNING: {movements_filtered / total_movements * 100:.1f}% of movements filtered by deadband!")
+            print(f"    This data may have been captured with the deadband filter bug.")
+            print(f"    Try:")
+            print(f"    1. Set deadband to 0.00° in visualization settings")
+            print(f"    2. Or capture a NEW swing (fixes applied to capture)")
+        
         print("="*60)
         
     def show(self):
@@ -415,6 +443,59 @@ class SwingVisualizer:
             
             btn_impact.on_clicked(focus_impact)
         
+        # Add 3D View Preset Buttons (stacked vertically on right side)
+        btn_width = 0.12
+        btn_height = 0.035
+        btn_x = 0.87
+        btn_y_start = 0.85
+        btn_spacing = 0.045
+        
+        # Add label for view buttons
+        ax_view_label = fig.add_axes([btn_x, btn_y_start + 0.04, btn_width, 0.02])
+        ax_view_label.axis('off')
+        ax_view_label.text(0.5, 0.5, '3D View Angles:', ha='center', va='center', 
+                          fontsize=9, fontweight='bold')
+        
+        # Down-the-line button
+        ax_btn_dtl = fig.add_axes([btn_x, btn_y_start, btn_width, btn_height])
+        btn_dtl = Button(ax_btn_dtl, 'Down-Line', color='lightblue', hovercolor='skyblue')
+        
+        def view_dtl(event):
+            self.axes['3d'].view_init(elev=15, azim=0, roll=0)
+            fig.canvas.draw_idle()
+        
+        btn_dtl.on_clicked(view_dtl)
+        
+        # Face-on button
+        ax_btn_face = fig.add_axes([btn_x, btn_y_start - btn_spacing, btn_width, btn_height])
+        btn_face = Button(ax_btn_face, 'Face-On', color='lightgreen', hovercolor='lightcoral')
+        
+        def view_face(event):
+            self.axes['3d'].view_init(elev=15, azim=90, roll=0)
+            fig.canvas.draw_idle()
+        
+        btn_face.on_clicked(view_face)
+        
+        # Top-down button
+        ax_btn_top = fig.add_axes([btn_x, btn_y_start - 2*btn_spacing, btn_width, btn_height])
+        btn_top = Button(ax_btn_top, 'Top-Down', color='lightyellow', hovercolor='gold')
+        
+        def view_top(event):
+            self.axes['3d'].view_init(elev=90, azim=0, roll=0)
+            fig.canvas.draw_idle()
+        
+        btn_top.on_clicked(view_top)
+        
+        # Side view button
+        ax_btn_side = fig.add_axes([btn_x, btn_y_start - 3*btn_spacing, btn_width, btn_height])
+        btn_side = Button(ax_btn_side, 'Side View', color='lightcoral', hovercolor='salmon')
+        
+        def view_side(event):
+            self.axes['3d'].view_init(elev=0, azim=0, roll=0)
+            fig.canvas.draw_idle()
+        
+        btn_side.on_clicked(view_side)
+        
         # Plot all views with full range initially
         self.plot_trajectory(ax1, 0, total_samples-1)
         self.plot_speed(ax2, 0, total_samples-1)
@@ -430,14 +511,6 @@ class SwingVisualizer:
             if hasattr(manager, 'window'):
                 # TkAgg backend
                 manager.window.state('zoomed')
-                # Try to bring window to front
-                try:
-                    manager.window.lift()
-                    manager.window.attributes('-topmost', True)
-                    manager.window.after_idle(manager.window.attributes, '-topmost', False)
-                    manager.window.focus_force()
-                except:
-                    pass
             elif hasattr(manager, 'frame'):
                 # Qt backends
                 manager.frame.showMaximized()
@@ -447,6 +520,27 @@ class SwingVisualizer:
         except Exception as e:
             # If window maximization fails, just continue with default size
             print(f"Note: Could not maximize window ({e}). Continuing with default size.")
+        
+        # Draw the window first to ensure it exists
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        
+        # Force window to front (above main application window)
+        try:
+            manager = fig.canvas.manager
+            if hasattr(manager, 'window'):
+                # Tkinter backend - aggressive window raising
+                window = manager.window
+                window.lift()
+                window.wm_attributes('-topmost', 1)  # Force to top
+                window.after(100, lambda: window.wm_attributes('-topmost', 0))  # Remove topmost after brief delay
+                window.focus_force()
+            elif hasattr(manager, 'frame'):
+                # Qt backends
+                manager.frame.raise_()
+                manager.frame.activateWindow()
+        except Exception as e:
+            print(f"Note: Could not bring window to front ({e}).")
         
         plt.show()
         
@@ -593,6 +687,19 @@ class SwingVisualizer:
         # elev=15 slight downward view from eye level
         # azim=0 view from behind golfer (down the in/out axis), backswing right, downswing left
         ax.view_init(elev=15, azim=0, roll=0)
+        
+        # Add diagnostic text overlay for troubleshooting
+        x_range_ft = np.ptp(positions_ft[:, 0])
+        y_range_ft = np.ptp(positions_ft[:, 1])
+        z_range_ft = np.ptp(positions_ft[:, 2])
+        total_path_ft = np.sum(np.linalg.norm(np.diff(positions_ft, axis=0), axis=1))
+        max_jump = np.max(np.linalg.norm(np.diff(positions_ft, axis=0), axis=1)) if len(positions_ft) > 1 else 0
+        
+        diag_text = (f'Range: X={x_range_ft:.1f}ft Y={y_range_ft:.1f}ft Z={z_range_ft:.1f}ft\n'
+                    f'Path: {total_path_ft:.1f}ft | Max jump: {max_jump:.2f}ft')
+        ax.text2D(0.02, 0.98, diag_text, transform=ax.transAxes, 
+                 fontsize=8, verticalalignment='top', family='monospace',
+                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
         ax.legend(loc='upper left')
         

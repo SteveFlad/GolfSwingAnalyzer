@@ -55,7 +55,7 @@ int sampleCount = 0;
 
 // Stationary drift suppression configuration
 float gyroBiasX = 0.0f, gyroBiasY = 0.0f, gyroBiasZ = 0.0f;
-const float GYRO_DEADBAND_RAD_S = 0.02f;      // ~1.15 deg/s
+const float GYRO_DEADBAND_RAD_S = 0.0f;       // DISABLED for testing - was 0.02f (~1.15 deg/s)
 const float STATIONARY_ACCEL_TOL_MS2 = 0.35f; // Accel magnitude must be near 1g
 const float GRAVITY_MS2 = 9.80665f;
 

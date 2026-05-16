@@ -19,5 +19,7 @@
             "source.organizeImports": "never"
         },
         "editor.defaultFormatter": "ms-python.python"
-    }
+    },
+    "python.dataScience.sendSelectionToInteractiveWindow": false,
+    "jupyter.alwaysTrustNotebooks": true
 }

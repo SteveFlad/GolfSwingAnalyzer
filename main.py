@@ -174,8 +174,17 @@ class VisualizationFilterDialog:
 class GolfSwingAnalyzer:
     def __init__(self, root):
         self.root = root
-        self.root.title("Golf Swing Analyzer")
+        self.root.title("Golf Swing Analyzer - v1.3 (View Buttons)")
         self.root.state('zoomed')  # Maximize window
+        
+        # Version identifier for capture fix
+        self.APP_VERSION = "1.3-VIEW-BUTTONS-2026-05-16"
+        print("="*70)
+        print(f"Golf Swing Analyzer {self.APP_VERSION}")
+        print("✓ Capture bug fix: Data saved BEFORE deadband filter")
+        print("✓ Visualization uses your 'Noise Filter' setting automatically")
+        print("✓ Added 3D view preset buttons (Down-Line, Face-On, Top-Down, Side)")
+        print("="*70)
         
         self.serial_capture = None
         self.bluetooth_capture = None
@@ -327,6 +336,10 @@ class GolfSwingAnalyzer:
         elif BLUETOOTH_TYPE:
             self.root.after(100, lambda: self.log_status(
                 f"Bluetooth support enabled ({BLUETOOTH_TYPE})"))
+        
+        # Log version info to confirm fix is loaded
+        self.root.after(50, lambda: self.log_status(
+            f"✓ Running {self.APP_VERSION} - Capture bug fixed!"))
         
         # Data Summary
         summary_frame = ttk.LabelFrame(self.root, text="Data Summary", padding=10)
@@ -766,24 +779,26 @@ class GolfSwingAnalyzer:
             except Exception as e:
                 pass  # Ignore calibration errors
 
-        # Apply live quaternion deadband filtering to suppress idle jitter.
-        try:
-            self.apply_deadband_filter(data_dict)
-            q0, q1, q2, q3 = data_dict['q0'], data_dict['q1'], data_dict['q2'], data_dict['q3']
-        except Exception:
-            pass
-        
         # Log periodically to show data is coming in
         if self._data_received_count % 20 == 1:
             self.log_status(f"Receiving data: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f}")
         
+        # Save RAW unfiltered data when capturing to preserve all motion
+        # CRITICAL: Make a copy so deadband filter doesn't modify captured data
         if self.is_capturing:
-            self.current_data.append(data_dict)
+            self.current_data.append(data_dict.copy())
             self.update_data_count()
             
             # Log to status (limit frequency)
             if len(self.current_data) % 10 == 0:
                 self.log_status(f"Captured: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f}")
+        
+        # Apply live quaternion deadband filtering ONLY for display (not captured data)
+        try:
+            self.apply_deadband_filter(data_dict)
+            q0, q1, q2, q3 = data_dict['q0'], data_dict['q1'], data_dict['q2'], data_dict['q3']
+        except Exception:
+            pass
     
     def update_data_count(self):
         """Update data count display"""
@@ -943,11 +958,15 @@ class GolfSwingAnalyzer:
             messagebox.showwarning("Warning", "No data to visualize")
             return
         
+        # Use current capture deadband as default for visualization
+        # (User's "Noise Filter" setting should carry over)
+        current_capture_deadband = self.deadband_var.get()
+        
         # Show filter configuration dialog with saved settings
-        self.log_status("Opening filter settings dialog...")
+        self.log_status(f"Opening filter settings dialog (using capture deadband: {current_capture_deadband:.2f}°)...")
         dialog = VisualizationFilterDialog(
             self.root, 
-            current_deadband=self.viz_filter_config['deadband_deg'],
+            current_deadband=current_capture_deadband,  # Use capture setting, not saved viz setting
             smoothing_window=self.viz_filter_config['smoothing_window'],
             noise_floor=self.viz_filter_config['noise_floor'],
             filter_type=self.viz_filter_config['filter_type']
@@ -969,9 +988,6 @@ class GolfSwingAnalyzer:
                           f"deadband={dialog.result['deadband_deg']:.2f}°, "
                           f"noise_floor={dialog.result['noise_floor']:.0f}%")
             
-            # Temporarily minimize main window so visualization appears on top
-            self.root.iconify()
-            
             # Use 'ground' coordinate system: X=left/right (target line), Y=up/down, Z=in/out
             visualizer = SwingVisualizer(
                 self.current_data,
@@ -987,20 +1003,8 @@ class GolfSwingAnalyzer:
             # Show visualization (this blocks until window is closed)
             visualizer.show()
             
-            # Restore main window after visualization closes
-            self.root.deiconify()
-            self.root.lift()
-            self.root.focus_force()
-            
             self.log_status("Visualization window closed")
         except Exception as e:
-            # Restore main window even if there's an error
-            try:
-                self.root.deiconify()
-                self.root.lift()
-            except:
-                pass
-            
             import traceback
             error_msg = f"Visualization error: {str(e)}"
             try:
