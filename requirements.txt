@@ -4,4 +4,5 @@ pyserial>=3.5
 scipy>=1.7.0
 isort==8.0.1  # Pinned to stable version compatible with Python 3.13
 # BLE (Bluetooth Low Energy) support (optional but recommended)
-bleak>=0.19.0  # Cross-platform BLE library - works on Windows, macOS, Linux
+bleak>=0.19.0  # Cross-platform BLE library - works on Windows, macOS, Linux# Remote trigger support (optional)
+keyboard>=0.13.5  # For AB Shutter remote button detection

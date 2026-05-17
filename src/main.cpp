@@ -33,6 +33,7 @@ Adafruit_ICM20948 icm;
 #define SDA_PIN 5
 #define SCL_PIN 6
 #define LED_PIN 21
+#define TRIGGER_BUTTON_PIN 9  // Physical button for triggering capture
 
 // Configuration
 #define SERIAL_BAUD 115200
@@ -61,6 +62,11 @@ const float GRAVITY_MS2 = 9.80665f;
 
 // Calibration mode
 bool calibrationMode = false;
+
+// Button trigger variables
+bool lastButtonState = HIGH;  // Pull-up: HIGH=not pressed, LOW=pressed
+unsigned long lastButtonPress = 0;
+const unsigned long BUTTON_DEBOUNCE_MS = 300;
 
 // BLE Server Callbacks
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -261,6 +267,9 @@ void setup() {
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
     
+    // Initialize trigger button (with internal pull-up)
+    pinMode(TRIGGER_BUTTON_PIN, INPUT_PULLUP);
+    
     // Initialize Serial
     Serial.begin(SERIAL_BAUD);
     delay(2000);
@@ -366,6 +375,23 @@ void setup() {
 void loop() {
     sensors_event_t accel, gyro, mag, temp;
     
+    // Check for physical button press
+    bool buttonState = digitalRead(TRIGGER_BUTTON_PIN);
+    unsigned long now = millis();
+    
+    if (buttonState == LOW && lastButtonState == HIGH) {  // Button pressed
+        if (now - lastButtonPress > BUTTON_DEBOUNCE_MS) {
+            Serial.println("TRIGGER:PRESSED");
+            if (bleConnected && pCharacteristic) {
+                pCharacteristic->setValue("TRIGGER:PRESSED");
+                pCharacteristic->notify();
+            }
+            blinkLED(1, 50);  // Quick visual feedback
+            lastButtonPress = now;
+        }
+    }
+    lastButtonState = buttonState;
+    
     // Check for serial commands
     if (Serial.available() > 0) {
         String command = Serial.readStringUntil('\n');
@@ -389,7 +415,8 @@ void loop() {
         return;
     }
     
-    unsigned long now = millis();
+    // Update timing (now already declared at top of loop)
+    now = millis();
     float dt = (now - lastUpdate) / 1000.0f;
     lastUpdate = now;
     
