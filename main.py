@@ -180,12 +180,13 @@ class GolfSwingAnalyzer:
         self.root.state('zoomed')  # Maximize window
         
         # Version identifier for capture fix
-        self.APP_VERSION = "2.0-IMPACT-BUFFER-2026-05-17"
+        self.APP_VERSION = "2.0-IMPACT-FILTER-2026-05-18"
         print("="*70)
         print(f"Golf Swing Analyzer {self.APP_VERSION}")
         print("✓ Continuous streaming buffer with impact detection")
         print("✓ Auto-capture pre/post impact data (configurable buffer size)")
-        print("✓ Impact threshold detection (default 50°/s)")
+        print("✓ Impact threshold detection (default 800°/s, smoothed over 5 samples)")
+        print("✓ Noise filtering: requires 5 consecutive high-velocity samples")
         print("="*70)
         
         self.serial_capture = None
@@ -202,9 +203,16 @@ class GolfSwingAnalyzer:
         self.pre_impact_data = []
         self.post_impact_data = []
         self.post_impact_count = 0
-        self.impact_threshold = 50.0  # Degrees per second threshold for impact detection
+        self.impact_threshold = 800.0  # Degrees per second threshold for impact detection (real swings are 1000-3000°/s)
         self.prev_quat_for_impact = None
         self.capture_state = "STREAMING"  # States: STREAMING, CAPTURING_POST, READY_TO_SAVE
+        self.impact_warmup_count = 0  # Count samples before enabling impact detection
+        self.IMPACT_WARMUP_SAMPLES = 20  # Require 20 samples (~0.2s) before detecting impact
+        self.consecutive_high_velocity = 0  # Count consecutive samples above threshold
+        self.CONSECUTIVE_REQUIRED = 5  # Require 5 consecutive high-velocity samples (0.05s)
+        self.debug_angular_velocity = False  # Set to True to log angular velocity values (generates lots of output)
+        self.angular_velocity_window = deque(maxlen=10)  # Sliding window for velocity smoothing
+        self.VELOCITY_SMOOTHING_SAMPLES = 5  # Average over last N samples
         
         self.monitor_thread = None
         self.monitoring = False
@@ -285,12 +293,12 @@ class GolfSwingAnalyzer:
         ttk.Label(control_frame, text="points").grid(row=2, column=2, sticky="w", padx=0, pady=5)
         
         ttk.Label(control_frame, text="Impact Threshold:").grid(row=2, column=3, sticky="w", padx=5, pady=5)
-        self.impact_threshold_var = tk.DoubleVar(value=50.0)
+        self.impact_threshold_var = tk.DoubleVar(value=800.0)
         impact_threshold_spinbox = ttk.Spinbox(
             control_frame,
-            from_=10.0,
-            to=200.0,
-            increment=5.0,
+            from_=100.0,
+            to=3000.0,
+            increment=50.0,
             textvariable=self.impact_threshold_var,
             width=8,
             command=self.update_impact_threshold
@@ -736,12 +744,12 @@ class GolfSwingAnalyzer:
         """Update the impact detection threshold from UI control"""
         try:
             new_threshold = self.impact_threshold_var.get()
-            if new_threshold < 10.0:
-                new_threshold = 10.0
-                self.impact_threshold_var.set(10.0)
-            elif new_threshold > 200.0:
-                new_threshold = 200.0
-                self.impact_threshold_var.set(200.0)
+            if new_threshold < 100.0:
+                new_threshold = 100.0
+                self.impact_threshold_var.set(100.0)
+            elif new_threshold > 3000.0:
+                new_threshold = 3000.0
+                self.impact_threshold_var.set(3000.0)
             
             self.impact_threshold = new_threshold
             self.log_status(f"Impact threshold updated to {new_threshold}°/s")
@@ -756,6 +764,9 @@ class GolfSwingAnalyzer:
         self.post_impact_count = 0
         self.impact_detected = False
         self.prev_quat_for_impact = None
+        self.impact_warmup_count = 0  # Reset warmup counter
+        self.consecutive_high_velocity = 0  # Reset consecutive counter
+        self.angular_velocity_window.clear()  # Clear velocity smoothing window
         self.capture_state = "STREAMING"
         self.current_data = []
         self.save_btn.config(state="disabled", bg="#9e9e9e")
@@ -806,8 +817,22 @@ class GolfSwingAnalyzer:
     def detect_impact(self, current_quat):
         """Detect impact based on angular velocity threshold
         
+        Requires consecutive high-velocity samples to filter out noise spikes.
+        Uses moving average to smooth velocity readings.
         Returns: True if impact detected, False otherwise
         """
+        # Initialize or update warmup counter
+        if self.impact_warmup_count < self.IMPACT_WARMUP_SAMPLES:
+            self.impact_warmup_count += 1
+            self.prev_quat_for_impact = current_quat
+            
+            # Log when warmup completes
+            if self.impact_warmup_count == self.IMPACT_WARMUP_SAMPLES:
+                self.log_status(f"✓ Impact detection ACTIVE (warmup complete, threshold: {self.impact_threshold}°/s, {self.CONSECUTIVE_REQUIRED} consecutive samples required, smoothing: {self.VELOCITY_SMOOTHING_SAMPLES} samples)")
+                self.update_data_count()
+            
+            return False  # Skip impact detection during warmup
+        
         if self.prev_quat_for_impact is None:
             self.prev_quat_for_impact = current_quat
             return False
@@ -825,13 +850,41 @@ class GolfSwingAnalyzer:
         angle_deg = np.rad2deg(angle_rad)
         
         # Assuming 100 Hz sample rate, angular velocity in deg/s
-        angular_velocity = angle_deg * 100.0
+        raw_angular_velocity = angle_deg * 100.0
+        
+        # Add to sliding window for smoothing
+        self.angular_velocity_window.append(raw_angular_velocity)
+        
+        # Calculate smoothed velocity (average of last N samples)
+        if len(self.angular_velocity_window) >= self.VELOCITY_SMOOTHING_SAMPLES:
+            # Use only the most recent N samples for averaging
+            recent_velocities = list(self.angular_velocity_window)[-self.VELOCITY_SMOOTHING_SAMPLES:]
+            smoothed_velocity = sum(recent_velocities) / len(recent_velocities)
+        else:
+            # Not enough samples yet, use raw velocity
+            smoothed_velocity = raw_angular_velocity
+        
+        # Debug logging - log every sample when debug is enabled
+        if self.debug_angular_velocity:
+            self.log_status(f"[DEBUG] Raw: {raw_angular_velocity:.1f}°/s | Smoothed: {smoothed_velocity:.1f}°/s | Consecutive: {self.consecutive_high_velocity}/{self.CONSECUTIVE_REQUIRED}")
         
         # Update previous quaternion
         self.prev_quat_for_impact = current_quat
         
-        # Check if exceeds threshold
-        return angular_velocity > self.impact_threshold
+        # Check if SMOOTHED velocity exceeds threshold
+        if smoothed_velocity > self.impact_threshold:
+            self.consecutive_high_velocity += 1
+            
+            # Only trigger impact after consecutive high-velocity samples
+            if self.consecutive_high_velocity >= self.CONSECUTIVE_REQUIRED:
+                self.log_status(f"🎯 IMPACT TRIGGERED! Smoothed velocity: {smoothed_velocity:.1f}°/s (raw: {raw_angular_velocity:.1f}°/s)")
+                self.consecutive_high_velocity = 0  # Reset for next detection
+                return True
+        else:
+            # Reset counter if velocity drops below threshold
+            self.consecutive_high_velocity = 0
+        
+        return False
     
     def _set_save_button_enabled(self, enabled):
         """Enable or disable the save button"""
@@ -943,7 +996,10 @@ class GolfSwingAnalyzer:
     def update_data_count(self):
         """Update data count display with buffer status"""
         if self.capture_state == "STREAMING":
-            status_text = f"Buffer: {len(self.stream_buffer)}/{self.buffer_size} | State: STREAMING"
+            warmup_status = ""
+            if self.impact_warmup_count < self.IMPACT_WARMUP_SAMPLES:
+                warmup_status = f" [WARMUP {self.impact_warmup_count}/{self.IMPACT_WARMUP_SAMPLES}]"
+            status_text = f"Buffer: {len(self.stream_buffer)}/{self.buffer_size} | State: STREAMING{warmup_status}"
         elif self.capture_state == "CAPTURING_POST":
             status_text = f"Pre: {len(self.pre_impact_data)} | Post: {self.post_impact_count}/{self.buffer_size} | State: CAPTURING"
         elif self.capture_state == "READY_TO_SAVE":
