@@ -50,7 +50,7 @@ bool bleConnected = false;
 
 // Madgwick filter variables
 float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
-float beta = 0.3f;  // Filter gain - reduced for smoother output (was 0.5f)
+float beta = 1.5f;  // INCREASED for fast golf swings - was 0.3f (too slow for 2000+ deg/s movements)
 unsigned long lastUpdate = 0;
 int sampleCount = 0;
 
@@ -67,6 +67,13 @@ bool calibrationMode = false;
 bool lastButtonState = HIGH;  // Pull-up: HIGH=not pressed, LOW=pressed
 unsigned long lastButtonPress = 0;
 const unsigned long BUTTON_DEBOUNCE_MS = 300;
+
+// Sensor health monitoring
+int consecutiveFailures = 0;
+const int MAX_CONSECUTIVE_FAILURES = 50;  // Relaxed: Stop after 50 failed reads (~0.75 seconds)
+bool sensorHealthy = true;
+unsigned long startupTime = 0;  // Track startup time
+const unsigned long STARTUP_GRACE_PERIOD_MS = 5000;  // 5 second grace period before health checks
 
 // BLE Server Callbacks
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -370,6 +377,7 @@ void setup() {
     
     digitalWrite(LED_PIN, HIGH);
     lastUpdate = millis();
+    startupTime = millis();  // Record startup time for grace period
 }
 
 void loop() {
@@ -410,7 +418,22 @@ void loop() {
     bool success = icm.getEvent(&accel, &gyro, &temp, &mag);
     
     if (!success) {
-        // If read failed, skip this iteration
+        // Skip health checks during startup grace period
+        if (millis() - startupTime < STARTUP_GRACE_PERIOD_MS) {
+            delay(10);
+            return;
+        }
+        
+        // If read failed, increment failure counter
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && sensorHealthy) {
+            sensorHealthy = false;
+            Serial.println("ERROR: Sensor disconnected or failed!");
+            if (bleConnected && pCharacteristic) {
+                pCharacteristic->setValue("ERROR:SENSOR_DISCONNECTED");
+                pCharacteristic->notify();
+            }
+        }
         delay(10);
         return;
     }
@@ -433,8 +456,42 @@ void loop() {
     // Check if we got valid data (not all zeros)
     if (ax == 0.0f && ay == 0.0f && az == 0.0f && 
         gx == 0.0f && gy == 0.0f && gz == 0.0f) {
-        // All zeros - bad read, skip this sample
+        // Skip health checks during startup grace period
+        if (millis() - startupTime < STARTUP_GRACE_PERIOD_MS) {
+            delay(10);
+            return;
+        }
+        
+        // All zeros - bad read, increment failure counter
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && sensorHealthy) {
+            sensorHealthy = false;
+            Serial.println("ERROR: Sensor returning all zeros!");
+            if (bleConnected && pCharacteristic) {
+                pCharacteristic->setValue("ERROR:SENSOR_NO_DATA");
+                pCharacteristic->notify();
+            }
+        }
         delay(10);
+        return;
+    }
+    
+    // Valid data received - reset failure counter and restore health status
+    if (consecutiveFailures > 0) {
+        consecutiveFailures = 0;
+        if (!sensorHealthy) {
+            sensorHealthy = true;
+            Serial.println("Sensor reconnected and healthy");
+            if (bleConnected && pCharacteristic) {
+                pCharacteristic->setValue("STATUS:SENSOR_RESTORED");
+                pCharacteristic->notify();
+            }
+        }
+    }
+    
+    // Stop transmitting if sensor is unhealthy
+    if (!sensorHealthy) {
+        delay(100);
         return;
     }
 

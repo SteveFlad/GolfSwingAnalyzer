@@ -186,7 +186,22 @@ class SerialCapture:
         Expected formats:
         - Quaternion: Q0:0.123 Q1:-0.456 Q2:0.789 Q3:-0.012
         - Raw sensor: RAW AX:1.23 AY:-4.56 AZ:9.81 GX:0.12 GY:-0.34 GZ:0.56
+        - Error: ERROR:SENSOR_DISCONNECTED
+        - Status: STATUS:SENSOR_RESTORED
         """
+        # Check for error/status messages from firmware
+        if line.startswith("ERROR:"):
+            error_msg = line.replace("ERROR:", "").replace("_", " ")
+            print(f"[SERIAL ERROR] Sensor error: {error_msg}")
+            if self.connection_lost_callback:
+                self.connection_lost_callback(f"Sensor error: {error_msg}")
+            return None
+        
+        if line.startswith("STATUS:"):
+            status_msg = line.replace("STATUS:", "").replace("_", " ")
+            print(f"[SERIAL STATUS] {status_msg}")
+            return None
+        
         # Try to parse raw sensor data first
         raw_match = self.raw_pattern.search(line)
         if raw_match:

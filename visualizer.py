@@ -243,47 +243,70 @@ class SwingVisualizer:
         self.positions = np.array(self.positions)
         self.velocities = np.array(self.velocities)
         
-        # Detect impact point (maximum speed with deceleration)
+        # Detect impact point (maximum speed with optional deceleration check)
         self.impact_idx = None
         if len(self.velocities) > 10:
             max_speed_idx = np.argmax(self.velocities)
             max_speed_mph = self.velocities[max_speed_idx] * self.rad_to_mph
+            
+            print(f"Max speed: {max_speed_mph:.1f} mph at sample #{max_speed_idx}")
             
             # Check for deceleration after peak (characteristic of ball contact)
             if max_speed_idx < len(self.velocities) - 10:
                 post_impact_speeds = self.velocities[max_speed_idx:max_speed_idx+10] * self.rad_to_mph
                 speed_drop = max_speed_mph - np.min(post_impact_speeds)
                 
-                # If speed drops by >10 mph within 0.1s, likely ball contact
-                if speed_drop > 10:
+                print(f"Speed drop after peak: {speed_drop:.1f} mph")
+                
+                # If speed drops by >5 mph within 0.1s, likely ball contact
+                # Lowered threshold from 10 to 5 mph for better detection
+                if speed_drop > 5:
                     self.impact_idx = max_speed_idx
-                    print(f"✓ Impact detected at sample #{max_speed_idx} ({max_speed_mph:.1f} mph)")
+                    print(f"✓ Impact detected at sample #{max_speed_idx} ({max_speed_mph:.1f} mph, drop: {speed_drop:.1f} mph)")
+                else:
+                    # Use max speed as impact if speed is reasonable (>30 mph)
+                    if max_speed_mph > 30:
+                        self.impact_idx = max_speed_idx
+                        print(f"✓ Impact assumed at max speed sample #{max_speed_idx} ({max_speed_mph:.1f} mph)")
+                    else:
+                        print(f"⚠ No clear impact detected (max speed {max_speed_mph:.1f} mph, drop {speed_drop:.1f} mph)")
+            else:
+                # Max speed at end of swing
+                if max_speed_mph > 30:
+                    self.impact_idx = max_speed_idx
+                    print(f"✓ Impact assumed at max speed sample #{max_speed_idx} ({max_speed_mph:.1f} mph)")
+                else:
+                    print(f"⚠ Max speed too low for impact detection: {max_speed_mph:.1f} mph")
         
         # Normalize position based on impact point (X, Y, Z)
-        # This centers the visualization on the ball position
+        # Ball at (0, -14, 15)
         if len(self.positions) > 0 and self.impact_idx is not None:
             impact_pos = self.positions[self.impact_idx].copy()
             
             # Set impact X (target line) to 0
             self.positions[:, 0] -= impact_pos[0]
             
-            # Set impact Y (in/out) to 0
-            self.positions[:, 1] -= impact_pos[1]
+            # Set impact Y (in/out) to -14
+            target_impact_y = -14.0 / self.m_to_ft  # -14 ft in meters
+            y_offset = target_impact_y - impact_pos[1]
+            self.positions[:, 1] += y_offset
             
-            # Set impact Z (height) to 0.7 ft (driver on tee)
-            target_impact_height = 0.7 / self.m_to_ft  # 0.7 ft in meters
-            height_offset = target_impact_height - impact_pos[2]
-            self.positions[:, 2] += height_offset
+            # Set impact Z (height) to 0 (ground level)
+            target_impact_z = 0.0 / self.m_to_ft  # 0 ft in meters (ground level)
+            z_offset = target_impact_z - impact_pos[2]
+            self.positions[:, 2] += z_offset
             
-            print(f"✓ Impact normalized to origin: (0, 0, 0.7 ft)")
+            print(f"✓ Impact normalized to: (0, -14, 0) ft")
         elif len(self.positions) > 0:
             # Fallback: normalize based on address if no impact detected
             address_pos = self.positions[0].copy()
             self.positions[:, 0] -= address_pos[0]
-            self.positions[:, 1] -= address_pos[1]
-            target_address_height = 0.5 / self.m_to_ft
-            height_offset = target_address_height - address_pos[2]
-            self.positions[:, 2] += height_offset
+            target_address_y = -14.0 / self.m_to_ft
+            y_offset = target_address_y - address_pos[1]
+            self.positions[:, 1] += y_offset
+            target_address_z = 0.0 / self.m_to_ft  # Ground level
+            z_offset = target_address_z - address_pos[2]
+            self.positions[:, 2] += z_offset
         
         # Print diagnostic information
         print(f"\n=== Swing Data Analysis (Natural Golf Coordinates) ===")
@@ -291,8 +314,24 @@ class SwingVisualizer:
         print(f"Position points: {len(self.positions)}")
         print(f"Deadband filter: {self.deadband_deg:.2f}° ({np.rad2deg(self.deadband_rad):.2f}°)")
         print(f"Movements applied: {movements_applied} / Filtered: {movements_filtered}")
-        print(f"Max speed: {np.max(self.velocities):.2f} rad/s ({np.max(self.velocities) * self.rad_to_mph:.1f} mph)")
-        print(f"Position range - Target Line (X): {np.min(self.positions[:, 0]):.3f} to {np.max(self.positions[:, 0]):.3f} m ({np.ptp(self.positions[:, 0]) * self.m_to_ft:.2f} ft)")
+        
+        # Detailed speed diagnostics
+        max_speed_raw = np.max(raw_speeds)
+        max_speed_smoothed = np.max(self.velocities)
+        print(f"\nSpeed Analysis:")
+        print(f"  Raw max speed: {max_speed_raw:.2f} rad/s ({max_speed_raw * self.rad_to_mph:.1f} mph)")
+        print(f"  Smoothed max speed: {max_speed_smoothed:.2f} rad/s ({max_speed_smoothed * self.rad_to_mph:.1f} mph)")
+        print(f"  Club length: {self.club_length_m:.3f} m ({self.club_length_m * self.m_to_ft:.2f} ft)")
+        print(f"  Conversion factor: {self.rad_to_mph:.3f} mph per rad/s")
+        
+        # Show first few quaternion differences to diagnose low movement
+        if len(self.data) > 5:
+            print(f"\nFirst few quaternion samples:")
+            for i in range(min(5, len(self.data))):
+                q = self.data[i]
+                print(f"  Sample {i}: q0={q['q0']:.4f} q1={q['q1']:.4f} q2={q['q2']:.4f} q3={q['q3']:.4f}")
+        
+        print(f"\nPosition range - Target Line (X): {np.min(self.positions[:, 0]):.3f} to {np.max(self.positions[:, 0]):.3f} m ({np.ptp(self.positions[:, 0]) * self.m_to_ft:.2f} ft)")
         print(f"Position range - In/Out (Y):      {np.min(self.positions[:, 1]):.3f} to {np.max(self.positions[:, 1]):.3f} m ({np.ptp(self.positions[:, 1]) * self.m_to_ft:.2f} ft)")
         print(f"Position range - Height (Z):      {np.min(self.positions[:, 2]):.3f} to {np.max(self.positions[:, 2]):.3f} m ({np.ptp(self.positions[:, 2]) * self.m_to_ft:.2f} ft)")
         total_distance = np.sum(np.linalg.norm(np.diff(self.positions, axis=0), axis=1))
@@ -443,12 +482,12 @@ class SwingVisualizer:
             
             btn_impact.on_clicked(focus_impact)
         
-        # Add 3D View Preset Buttons (stacked vertically on right side)
-        btn_width = 0.12
-        btn_height = 0.035
-        btn_x = 0.87
-        btn_y_start = 0.85
-        btn_spacing = 0.045
+        # Add 3D View Preset Buttons (positioned left of Top View, below Speed plot)
+        btn_width = 0.10
+        btn_height = 0.032
+        btn_x = 0.605  # Between 3D plot and right-side plots (moved left 25% of width)
+        btn_y_start = 0.62  # Below speed plot, above top view
+        btn_spacing = 0.042
         
         # Add label for view buttons
         ax_view_label = fig.add_axes([btn_x, btn_y_start + 0.04, btn_width, 0.02])
@@ -461,17 +500,17 @@ class SwingVisualizer:
         btn_dtl = Button(ax_btn_dtl, 'Down-Line', color='lightblue', hovercolor='skyblue')
         
         def view_dtl(event):
-            self.axes['3d'].view_init(elev=15, azim=0, roll=0)
+            self.axes['3d'].view_init(elev=-15, azim=0, roll=0)
             fig.canvas.draw_idle()
         
         btn_dtl.on_clicked(view_dtl)
         
         # Face-on button
         ax_btn_face = fig.add_axes([btn_x, btn_y_start - btn_spacing, btn_width, btn_height])
-        btn_face = Button(ax_btn_face, 'Face-On', color='lightgreen', hovercolor='lightcoral')
+        btn_face = Button(ax_btn_face, 'Normal Stance', color='lightgreen', hovercolor='lightcoral')
         
         def view_face(event):
-            self.axes['3d'].view_init(elev=15, azim=90, roll=0)
+            self.axes['3d'].view_init(elev=-15, azim=90, roll=0)
             fig.canvas.draw_idle()
         
         btn_face.on_clicked(view_face)
@@ -601,8 +640,8 @@ class SwingVisualizer:
         ax.scatter(*positions_ft[-1], color='red', s=100, marker='X', 
                   label=f'End (#{end_idx})', zorder=10)
         
-        # Mark ball position at origin (0, 0, ground level)
-        ax.scatter(0, 0, 0, color='white', s=150, marker='o', 
+        # Mark ball position at (0, -14, 0) - ground level
+        ax.scatter(0, -14, 0, color='white', s=150, marker='o', 
                   edgecolors='black', linewidths=3, label='Ball', zorder=12)
         
         # Mark impact point if detected and within visible range
@@ -644,39 +683,37 @@ class SwingVisualizer:
                     color='darkred', alpha=0.6, arrow_length_ratio=0.8, linewidth=2.5
                 )
         
-        # Set axis limits with padding to contain arrows
-        padding = arrow_scale * 1.5
-        x_min, x_max = positions_ft[:, 0].min() - padding, positions_ft[:, 0].max() + padding
-        y_min, y_max = positions_ft[:, 1].min() - padding, positions_ft[:, 1].max() + padding
-        z_min, z_max = positions_ft[:, 2].min() - padding, positions_ft[:, 2].max() + padding
+        # Set fixed axis limits: -15 to 15 on all axes
+        ax.set_xlim(-15, 15)
+        ax.set_ylim(-15, 15)
+        ax.set_zlim(-15, 15)  # Standard orientation: up is up
         
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.set_zlim(max(z_min, -1), z_max)  # Don't go too far underground
-        
-        # Draw ground plane (X-Y plane at Z=0) to emphasize floor
+        # Draw ground plane (X-Y plane at Z=0) and grid boundaries
         if self.coordinate_system == 'ground':
             from matplotlib.patches import Rectangle
             from mpl_toolkits.mplot3d import art3d
             
-            # Create a semi-transparent ground plane
-            ground_x = [x_min, x_max, x_max, x_min, x_min]
-            ground_y = [y_min, y_min, y_max, y_max, y_min]
+            # Create ground plane boundary at Z=0
+            ground_x = [-15, 15, 15, -15, -15]
+            ground_y = [-15, -15, 15, 15, -15]
             ground_z = [0, 0, 0, 0, 0]
             ax.plot(ground_x, ground_y, ground_z, 'k-', alpha=0.3, linewidth=1)
             
-            # Add grid on ground plane
-            for x_grid in np.linspace(x_min, x_max, 5):
-                ax.plot([x_grid, x_grid], [y_min, y_max], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
-            for y_grid in np.linspace(y_min, y_max, 5):
-                ax.plot([x_min, x_max], [y_grid, y_grid], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
+            # Add grid on ground plane (every 1 foot)
+            for x_grid in range(-15, 16):
+                ax.plot([x_grid, x_grid], [-15, 15], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
+            for y_grid in range(-15, 16):
+                ax.plot([-15, 15], [y_grid, y_grid], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
+            
+            # Mark ball reference at Y=-14, Z=0
+            ax.plot([0, 0], [-14, -14], [-15, 15], 'b--', alpha=0.3, linewidth=2, label='Ball Y=-14, Z=0')
         
         # Set labels for natural golf coordinate system
         if self.coordinate_system == 'ground':
-            ax.set_xlabel('Target Line (ft)', fontsize=10, fontweight='bold')
-            ax.set_ylabel('In/Out (ft)', fontsize=10, fontweight='bold')
-            ax.set_zlabel('Height (ft)', fontsize=10, fontweight='bold')
-            ax.set_title('3D Club Head Trajectory\n(Ball at origin, Ground at Z=0)', fontsize=11, fontweight='bold')
+            ax.set_xlabel('Target Line (ft)\n← Left | Right →', fontsize=10, fontweight='bold')
+            ax.set_ylabel('In/Out (ft)\n← Away | Toward Ball →', fontsize=10, fontweight='bold')
+            ax.set_zlabel('Height (ft)\n← Down | Up →', fontsize=10, fontweight='bold')
+            ax.set_title('3D Club Head Trajectory\n(Ball at X=0, Y=-14, Z=0)', fontsize=11, fontweight='bold')
         else:
             ax.set_xlabel('Shaft (ft)')
             ax.set_ylabel('Face Normal (ft)')
@@ -684,9 +721,9 @@ class SwingVisualizer:
             ax.set_title('3D Club Head Trajectory\n(Red arrows = velocity direction)')
         
         # Set viewing angle from DOWN THE TARGET LINE (face-on to golfer)
-        # elev=15 slight downward view from eye level
+        # elev=-15 slight upward view from below eye level (so Z-axis appears correct)
         # azim=0 view from behind golfer (down the in/out axis), backswing right, downswing left
-        ax.view_init(elev=15, azim=0, roll=0)
+        ax.view_init(elev=-15, azim=0, roll=0)
         
         # Add diagnostic text overlay for troubleshooting
         x_range_ft = np.ptp(positions_ft[:, 0])
@@ -701,7 +738,8 @@ class SwingVisualizer:
                  fontsize=8, verticalalignment='top', family='monospace',
                  bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        ax.legend(loc='upper left')
+        # Place legend in lower left to avoid overlap with diagnostic text in upper left
+        ax.legend(loc='lower left', fontsize=8, framealpha=0.9)
         
         # Add colorbar with speed in mph
         # Create colorbar with converted values
@@ -792,8 +830,8 @@ class SwingVisualizer:
         ax.scatter(positions_ft[-1, 0], positions_ft[-1, 1], color='red', s=100, marker='X', 
                   label=f'End (#{end_idx})')
         
-        # Mark ball at origin
-        ax.scatter(0, 0, color='white', s=150, marker='o', 
+        # Mark ball at (0, -14) in top view
+        ax.scatter(0, -14, color='white', s=150, marker='o', 
                   edgecolors='black', linewidths=3, label='Ball', zorder=12)
         
         # Mark impact if detected and within visible range
@@ -824,7 +862,11 @@ class SwingVisualizer:
         
         ax.set_xlabel('Target Line (ft)')
         ax.set_ylabel('In/Out (ft)')
-        ax.set_title('Top View\n(Ball at origin)', fontsize=10)
+        ax.set_title('Top View\n(Ball at X=0, Y=-14, Z=0)', fontsize=10)
+        ax.set_xlim(-15, 15)
+        ax.set_ylim(-15, 15)
+        ax.axhline(y=-14, color='blue', linestyle='--', alpha=0.3, linewidth=1)  # Ball Y position
+        ax.axvline(x=0, color='blue', linestyle='--', alpha=0.3, linewidth=1)  # Ball X position
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=7, framealpha=0.9)
@@ -864,8 +906,8 @@ class SwingVisualizer:
         ax.scatter(positions_ft[-1, 1], positions_ft[-1, 2], color='red', s=100, marker='X', 
                   label=f'End (#{end_idx})')
         
-        # Mark ball at ground level (origin on this view is at Y=0, Z=0)
-        ax.scatter(0, 0, color='white', s=150, marker='o', 
+        # Mark ball at (Y=-14, Z=0) in side view (ground level)
+        ax.scatter(-14, 0, color='white', s=150, marker='o', 
                   edgecolors='black', linewidths=3, label='Ball', zorder=12)
         
         # Mark impact if detected and within visible range
@@ -879,7 +921,11 @@ class SwingVisualizer:
         
         ax.set_xlabel('In/Out (ft)')
         ax.set_ylabel('Height (ft)')
-        ax.set_title('Side View\n(Ball at Y=0, ground)', fontsize=10)
+        ax.set_title('Side View\n(Face-on, Ball at Y=-14, Z=0)', fontsize=10)
+        ax.set_xlim(-15, 15)
+        ax.set_ylim(-15, 15)
+        ax.axhline(y=0, color='blue', linestyle='--', alpha=0.3, linewidth=1)  # Ball Z position (ground)
+        ax.axvline(x=-14, color='blue', linestyle='--', alpha=0.3, linewidth=1)  # Ball Y position
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=7, framealpha=0.9)

@@ -62,7 +62,7 @@ class BLECapture:
         self.total_received = 0
         self.total_parsed = 0
         self.last_data_time = None
-        self.data_timeout = 5.0  # seconds
+        self.data_timeout = 10.0  # seconds - increased to handle startup delays
         
         # Latest data storage for calibration
         self.latest_raw_data = None
@@ -167,14 +167,14 @@ class BLECapture:
                     await self.client.disconnect()
                     print(f"ERROR: Device doesn't have required BLE service/characteristic")
                     if self.connection_lost_callback:
-                        self.connection_lost_callback()
+                        self.connection_lost_callback("BLE service/characteristic not found")
                     return
                 
                 # Subscribe to notifications
                 await self.client.start_notify(self.CHARACTERISTIC_UUID, self._notification_handler)
                 
-                print("BLE connected and receiving data")
-                self.last_data_time = time.time()
+                print("BLE connected - waiting for data...")
+                self.last_data_time = time.time()  # Set initial time to avoid immediate timeout
                 
                 # Keep connection alive and monitor timeout
                 while self.is_running and self.client.is_connected:
@@ -205,11 +205,11 @@ class BLECapture:
                 if attempt == max_retries - 1:
                     print(f"BLE connection failed after {max_retries} attempts")
                     if self.connection_lost_callback:
-                        self.connection_lost_callback()
+                        self.connection_lost_callback("BLE connection failed after retries")
         
         # Connection lost or stopped
         if self.connection_lost_callback and self.is_running:
-            self.connection_lost_callback()
+            self.connection_lost_callback("BLE connection lost")
     
     def _notification_handler(self, sender, data: bytearray):
         """Handle BLE characteristic notifications"""
@@ -217,6 +217,23 @@ class BLECapture:
             message = data.decode('utf-8', errors='ignore').strip()
             self.total_received += 1
             self.last_data_time = time.time()
+            
+            # Debug: Log first few messages
+            if self.total_received <= 3:
+                print(f"[BLE DEBUG] Received notification #{self.total_received}: {message[:50]}")
+            
+            # Check for error/status messages from firmware
+            if message.startswith("ERROR:"):
+                error_msg = message.replace("ERROR:", "").replace("_", " ")
+                print(f"[BLE ERROR] Sensor error: {error_msg}")
+                if self.connection_lost_callback:
+                    self.connection_lost_callback(f"Sensor error: {error_msg}")
+                return
+            
+            if message.startswith("STATUS:"):
+                status_msg = message.replace("STATUS:", "").replace("_", " ")
+                print(f"[BLE STATUS] {status_msg}")
+                return
             
             # Try to parse raw sensor data first
             raw_match = self.raw_pattern.search(message)
@@ -283,7 +300,9 @@ class BLECapture:
         return {
             'total_received': self.total_received,
             'total_parsed': self.total_parsed,
-            'parse_rate': parse_rate
+            'parse_rate': parse_rate,
+            'last_data_time': self.last_data_time,
+            'seconds_since_data': (time.time() - self.last_data_time) if self.last_data_time else None
         }
     
     def enable_calibration_mode(self):

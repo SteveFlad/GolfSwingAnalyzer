@@ -8,11 +8,13 @@ import math
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
+import numpy as np
 
 from serial.tools import list_ports
 
@@ -174,16 +176,16 @@ class VisualizationFilterDialog:
 class GolfSwingAnalyzer:
     def __init__(self, root):
         self.root = root
-        self.root.title("Golf Swing Analyzer - v1.3 (View Buttons)")
+        self.root.title("Golf Swing Analyzer - v2.0 (Impact Detection)")
         self.root.state('zoomed')  # Maximize window
         
         # Version identifier for capture fix
-        self.APP_VERSION = "1.3-VIEW-BUTTONS-2026-05-16"
+        self.APP_VERSION = "2.0-IMPACT-BUFFER-2026-05-17"
         print("="*70)
         print(f"Golf Swing Analyzer {self.APP_VERSION}")
-        print("✓ Capture bug fix: Data saved BEFORE deadband filter")
-        print("✓ Visualization uses your 'Noise Filter' setting automatically")
-        print("✓ Added 3D view preset buttons (Down-Line, Face-On, Top-Down, Side)")
+        print("✓ Continuous streaming buffer with impact detection")
+        print("✓ Auto-capture pre/post impact data (configurable buffer size)")
+        print("✓ Impact threshold detection (default 50°/s)")
         print("="*70)
         
         self.serial_capture = None
@@ -192,6 +194,18 @@ class GolfSwingAnalyzer:
         self.is_capturing = False
         self.current_data = []
         self.current_filename = None  # Track the current data filename
+        
+        # Circular buffer for continuous streaming
+        self.buffer_size = 200  # Configurable pre/post impact points
+        self.stream_buffer = deque(maxlen=self.buffer_size)
+        self.impact_detected = False
+        self.pre_impact_data = []
+        self.post_impact_data = []
+        self.post_impact_count = 0
+        self.impact_threshold = 50.0  # Degrees per second threshold for impact detection
+        self.prev_quat_for_impact = None
+        self.capture_state = "STREAMING"  # States: STREAMING, CAPTURING_POST, READY_TO_SAVE
+        
         self.monitor_thread = None
         self.monitoring = False
         self.bt_devices = []
@@ -256,23 +270,54 @@ class GolfSwingAnalyzer:
         self.connect_btn.grid(row=1, column=4, padx=5, pady=5)
         
         # Capture Controls
-        ttk.Label(control_frame, text="Capture:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        self.capture_btn = tk.Button(
+        ttk.Label(control_frame, text="Buffer Size:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.buffer_size_var = tk.IntVar(value=200)
+        buffer_size_spinbox = ttk.Spinbox(
             control_frame,
-            text="Start Capture",
-            command=self.toggle_capture,
+            from_=50,
+            to=500,
+            textvariable=self.buffer_size_var,
+            width=8,
+            command=self.update_buffer_size
+        )
+        buffer_size_spinbox.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+        buffer_size_spinbox.bind('<Return>', lambda e: self.update_buffer_size())
+        ttk.Label(control_frame, text="points").grid(row=2, column=2, sticky="w", padx=0, pady=5)
+        
+        ttk.Label(control_frame, text="Impact Threshold:").grid(row=2, column=3, sticky="w", padx=5, pady=5)
+        self.impact_threshold_var = tk.DoubleVar(value=50.0)
+        impact_threshold_spinbox = ttk.Spinbox(
+            control_frame,
+            from_=10.0,
+            to=200.0,
+            increment=5.0,
+            textvariable=self.impact_threshold_var,
+            width=8,
+            command=self.update_impact_threshold
+        )
+        impact_threshold_spinbox.grid(row=2, column=4, sticky="w", padx=5, pady=5)
+        impact_threshold_spinbox.bind('<Return>', lambda e: self.update_impact_threshold())
+        ttk.Label(control_frame, text="°/s").grid(row=2, column=5, sticky="w", padx=0, pady=5)
+        
+        # Action buttons
+        ttk.Label(control_frame, text="Actions:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.save_btn = tk.Button(
+            control_frame,
+            text="Save to File",
+            command=self.save_captured_data,
             font=self.button_font,
             padx=12,
-            pady=6
+            pady=6,
+            state="disabled",
+            bg="#9e9e9e",
+            fg="white"
         )
-        self.capture_btn.grid(row=2, column=1, padx=5, pady=5)
-        self._set_capture_button_state(is_capturing=False)
-        self._set_capture_button_enabled(False)
+        self.save_btn.grid(row=3, column=1, padx=5, pady=5)
 
-        tk.Button(control_frame, text="Clear Data", command=self.clear_data, font=self.button_font, padx=12, pady=6).grid(row=2, column=2, padx=5, pady=5)
+        tk.Button(control_frame, text="Clear Buffer", command=self.clear_buffer, font=self.button_font, padx=12, pady=6).grid(row=3, column=2, padx=5, pady=5)
 
         # Live noise filter controls
-        ttk.Label(control_frame, text="Noise Filter:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(control_frame, text="Noise Filter:").grid(row=4, column=0, sticky="w", padx=5, pady=5)
         self.deadband_profile_combo = ttk.Combobox(
             control_frame,
             textvariable=self.deadband_profile_var,
@@ -280,7 +325,7 @@ class GolfSwingAnalyzer:
             width=12,
             state="readonly",
         )
-        self.deadband_profile_combo.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        self.deadband_profile_combo.grid(row=4, column=1, sticky="w", padx=5, pady=5)
         self.deadband_profile_combo.bind("<<ComboboxSelected>>", self.on_deadband_profile_changed)
 
         self.deadband_slider = ttk.Scale(
@@ -291,13 +336,13 @@ class GolfSwingAnalyzer:
             orient="horizontal",
             command=self.on_deadband_slider_changed,
         )
-        self.deadband_slider.grid(row=3, column=2, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.deadband_slider.grid(row=4, column=2, columnspan=2, sticky="ew", padx=5, pady=5)
 
         self.deadband_value_label = ttk.Label(control_frame, text="0.10 deg/sample")
-        self.deadband_value_label.grid(row=3, column=4, sticky="w", padx=5, pady=5)
+        self.deadband_value_label.grid(row=4, column=4, sticky="w", padx=5, pady=5)
 
         tk.Button(control_frame, text="Reset Settings", command=self.reset_settings, font=self.button_font, padx=12, pady=6).grid(
-            row=3, column=5, sticky="w", padx=5, pady=5
+            row=4, column=5, sticky="w", padx=5, pady=5
         )
         
         # File Controls
@@ -345,7 +390,7 @@ class GolfSwingAnalyzer:
         summary_frame = ttk.LabelFrame(self.root, text="Data Summary", padding=10)
         summary_frame.pack(fill="x", padx=10, pady=5)
         
-        self.data_count_label = ttk.Label(summary_frame, text="Data Points: 0")
+        self.data_count_label = ttk.Label(summary_frame, text="Buffer: 0/200 | State: STREAMING")
         self.data_count_label.pack(side="left", padx=10)
         
         self.connection_label = ttk.Label(summary_frame, text="Status: Not Connected", foreground="red")
@@ -638,7 +683,6 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text=f"Status: Connected via BLE", foreground="green")
             self.connect_btn.config(text="Disconnect")
             self.log_status(f"Connected to {device_addr} via BLE")
-            self._set_capture_button_enabled(True)
             self.start_monitoring()
         except Exception as e:
             messagebox.showerror("BLE Error", str(e))
@@ -655,7 +699,7 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
             self.log_status("Disconnected from USB/Serial")
-            self._set_capture_button_enabled(False)
+            self.clear_buffer()  # Clear buffer on disconnect
     
     def disconnect_bluetooth(self):
         """Disconnect from BLE"""
@@ -668,71 +712,145 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text="Status: Not Connected", foreground="red")
             self.connect_btn.config(text="Connect")
             self.log_status("Disconnected from BLE")
-            self._set_capture_button_enabled(False)
+            self.clear_buffer()  # Clear buffer on disconnect
+    
+    def update_buffer_size(self):
+        """Update the buffer size from UI control"""
+        try:
+            new_size = self.buffer_size_var.get()
+            if new_size < 50:
+                new_size = 50
+                self.buffer_size_var.set(50)
+            elif new_size > 500:
+                new_size = 500
+                self.buffer_size_var.set(500)
             
-    def start_capture(self):
-        """Start capturing data"""
-        if not self.is_connected():
-            messagebox.showerror("Error", "Please connect to a device first")
-            return
+            self.buffer_size = new_size
+            self.stream_buffer = deque(maxlen=self.buffer_size)
+            self.log_status(f"Buffer size updated to {new_size} points")
+            self.update_data_count()
+        except Exception as e:
+            self.log_status(f"Error updating buffer size: {e}")
+    
+    def update_impact_threshold(self):
+        """Update the impact detection threshold from UI control"""
+        try:
+            new_threshold = self.impact_threshold_var.get()
+            if new_threshold < 10.0:
+                new_threshold = 10.0
+                self.impact_threshold_var.set(10.0)
+            elif new_threshold > 200.0:
+                new_threshold = 200.0
+                self.impact_threshold_var.set(200.0)
             
-        self.is_capturing = True
+            self.impact_threshold = new_threshold
+            self.log_status(f"Impact threshold updated to {new_threshold}°/s")
+        except Exception as e:
+            self.log_status(f"Error updating impact threshold: {e}")
+    
+    def clear_buffer(self):
+        """Clear the streaming buffer and reset capture state"""
+        self.stream_buffer.clear()
+        self.pre_impact_data = []
+        self.post_impact_data = []
+        self.post_impact_count = 0
+        self.impact_detected = False
+        self.prev_quat_for_impact = None
+        self.capture_state = "STREAMING"
         self.current_data = []
-        self.current_filename = f"Live Capture {datetime.now().strftime('%Y-%m-%d %H-%M-%S')}"
-        self.filtered_prev_quat = None
-        self._set_capture_button_state(is_capturing=True)
-        self.log_status("Capture started")
-        
-    def stop_capture(self):
-        """Stop capturing data"""
-        self.is_capturing = False
-        self._set_capture_button_state(is_capturing=False)
-        self.log_status(f"Capture stopped. Total data points: {len(self.current_data)}")
-
-    def toggle_capture(self):
-        """Toggle capture start/stop"""
-        if self.is_capturing:
-            self.stop_capture()
-        else:
-            self.start_capture()
-
-    def _set_capture_button_state(self, is_capturing):
-        """Update capture toggle button appearance"""
-        if is_capturing:
-            self.capture_btn.config(
-                text="Stop Capture",
-                bg="#c62828",
-                fg="white",
-                activebackground="#9c0606",
-                activeforeground="white"
-            )
-        else:
-            self.capture_btn.config(
-                text="Start Capture",
-                bg="#2e7d32",
-                fg="white",
-                activebackground="#1b5e20",
-                activeforeground="white"
-            )
-
-    def _set_capture_button_enabled(self, enabled):
-        """Enable or disable the capture toggle button"""
-        if enabled:
-            self.capture_btn.config(state="normal")
-            self._set_capture_button_state(self.is_capturing)
-        else:
-            self.capture_btn.config(state="disabled", bg="#9e9e9e", fg="white")
-        
-    def clear_data(self):
-        """Clear current data"""
-        self.current_data = []
-        self.current_filename = None
-        self.filtered_prev_quat = None
+        self.save_btn.config(state="disabled", bg="#9e9e9e")
         self.update_data_count()
-        self.log_status("Data cleared")
+        self.log_status("Buffer cleared, streaming continues")
+    
+    def save_captured_data(self):
+        """Save the captured pre+post impact data to file"""
+        if self.capture_state != "READY_TO_SAVE":
+            messagebox.showwarning("Warning", "No impact data captured yet")
+            return
+        
+        if not self.pre_impact_data and not self.post_impact_data:
+            messagebox.showwarning("Warning", "No data to save")
+            return
+        
+        # Combine pre and post impact data
+        combined_data = self.pre_impact_data + self.post_impact_data
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialdir="data"
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    json.dump({
+                        'timestamp': datetime.now().isoformat(),
+                        'data_points': len(combined_data),
+                        'pre_impact_points': len(self.pre_impact_data),
+                        'post_impact_points': len(self.post_impact_data),
+                        'buffer_size': self.buffer_size,
+                        'impact_threshold': self.impact_threshold,
+                        'filter_config': self.viz_filter_config,
+                        'data': combined_data
+                    }, f, indent=2)
+                self.log_status(f"Impact data saved: {len(combined_data)} points ({len(self.pre_impact_data)} pre + {len(self.post_impact_data)} post)")
+                messagebox.showinfo("Success", f"Saved {len(combined_data)} points\n({len(self.pre_impact_data)} pre-impact + {len(self.post_impact_data)} post-impact)")
+                
+                # Reset to streaming after save
+                self.clear_buffer()
+            except Exception as e:
+                messagebox.showerror("Save Error", str(e))
+                self.log_status(f"Save error: {e}")
+    
+    def detect_impact(self, current_quat):
+        """Detect impact based on angular velocity threshold
+        
+        Returns: True if impact detected, False otherwise
+        """
+        if self.prev_quat_for_impact is None:
+            self.prev_quat_for_impact = current_quat
+            return False
+        
+        # Calculate angular change between quaternions
+        q0, q1, q2, q3 = current_quat
+        p0, p1, p2, p3 = self.prev_quat_for_impact
+        
+        # Quaternion dot product
+        dot = p0*q0 + p1*q1 + p2*q2 + p3*q3
+        dot = np.clip(dot, -1.0, 1.0)
+        
+        # Angular change in radians
+        angle_rad = 2 * np.arccos(abs(dot))
+        angle_deg = np.rad2deg(angle_rad)
+        
+        # Assuming 100 Hz sample rate, angular velocity in deg/s
+        angular_velocity = angle_deg * 100.0
+        
+        # Update previous quaternion
+        self.prev_quat_for_impact = current_quat
+        
+        # Check if exceeds threshold
+        return angular_velocity > self.impact_threshold
+    
+    def _set_save_button_enabled(self, enabled):
+        """Enable or disable the save button"""
+        if enabled:
+            self.save_btn.config(state="normal", bg="#2e7d32", fg="white",
+                               activebackground="#1b5e20", activeforeground="white")
+        else:
+            self.save_btn.config(state="disabled", bg="#9e9e9e", fg="white")
+            
+    def clear_data(self):
+        """Legacy method - now calls clear_buffer"""
+        self.clear_buffer()
         
     def on_data_received(self, data):
-        """Callback when new data is received from serial or BLE"""
+        """Callback when new data is received from serial or BLE
+        
+        New behavior: Continuously streams data into circular buffer,
+        detects impact, and captures pre/post impact data.
+        """
         # Always log incoming data (even when not capturing) to verify data is being received
         if not hasattr(self, '_data_received_count'):
             self._data_received_count = 0
@@ -781,18 +899,40 @@ class GolfSwingAnalyzer:
 
         # Log periodically to show data is coming in
         if self._data_received_count % 20 == 1:
-            self.log_status(f"Receiving data: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f}")
+            self.log_status(f"Streaming: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f} | State: {self.capture_state}")
         
-        # Save RAW unfiltered data when capturing to preserve all motion
-        # CRITICAL: Make a copy so deadband filter doesn't modify captured data
-        if self.is_capturing:
-            self.current_data.append(data_dict.copy())
-            self.update_data_count()
+        # NEW BUFFER-BASED CAPTURE SYSTEM
+        current_quat = (q0, q1, q2, q3)
+        
+        if self.capture_state == "STREAMING":
+            # Continuously add to circular buffer
+            self.stream_buffer.append(data_dict.copy())
             
-            # Log to status (limit frequency)
-            if len(self.current_data) % 10 == 0:
-                self.log_status(f"Captured: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f}")
-        
+            # Check for impact
+            if self.detect_impact(current_quat):
+                # Impact detected! Lock the pre-impact buffer
+                self.pre_impact_data = list(self.stream_buffer)
+                self.post_impact_data = []
+                self.post_impact_count = 0
+                self.capture_state = "CAPTURING_POST"
+                self.log_status(f"🎯 IMPACT DETECTED! Captured {len(self.pre_impact_data)} pre-impact points, collecting post-impact...")
+                self.update_data_count()
+                
+        elif self.capture_state == "CAPTURING_POST":
+            # Collecting post-impact data
+            self.post_impact_data.append(data_dict.copy())
+            self.post_impact_count += 1
+            
+            if self.post_impact_count >= self.buffer_size:
+                # Finished capturing post-impact
+                self.capture_state = "READY_TO_SAVE"
+                self.log_status(f"✓ Post-impact capture complete! {len(self.post_impact_data)} points. Ready to save.")
+                self._set_save_button_enabled(True)
+                self.update_data_count()
+                
+                # Also populate current_data for visualization
+                self.current_data = self.pre_impact_data + self.post_impact_data
+                
         # Apply live quaternion deadband filtering ONLY for display (not captured data)
         try:
             self.apply_deadband_filter(data_dict)
@@ -801,8 +941,18 @@ class GolfSwingAnalyzer:
             pass
     
     def update_data_count(self):
-        """Update data count display"""
-        self.data_count_label.config(text=f"Data Points: {len(self.current_data)}")
+        """Update data count display with buffer status"""
+        if self.capture_state == "STREAMING":
+            status_text = f"Buffer: {len(self.stream_buffer)}/{self.buffer_size} | State: STREAMING"
+        elif self.capture_state == "CAPTURING_POST":
+            status_text = f"Pre: {len(self.pre_impact_data)} | Post: {self.post_impact_count}/{self.buffer_size} | State: CAPTURING"
+        elif self.capture_state == "READY_TO_SAVE":
+            total = len(self.pre_impact_data) + len(self.post_impact_data)
+            status_text = f"Captured: {total} points ({len(self.pre_impact_data)}+{len(self.post_impact_data)}) | State: READY"
+        else:
+            status_text = f"State: {self.capture_state}"
+        
+        self.data_count_label.config(text=status_text)
         
     def log_status(self, message):
         """Log message to status display"""
@@ -823,10 +973,7 @@ class GolfSwingAnalyzer:
         """Handle connection lost in main thread"""
         self.log_status(f"CONNECTION LOST: {reason}")
         self.connection_label.config(text="Status: Connection Lost", foreground="orange")
-        self._set_capture_button_enabled(False)
-        
-        if self.is_capturing:
-            self.stop_capture()
+        self.clear_buffer()  # Clear buffer on connection lost
         
         # Show dialog
         result = messagebox.askyesno(
@@ -836,12 +983,21 @@ class GolfSwingAnalyzer:
         
         if result:
             self.log_status("Attempting to reconnect...")
-            self.disconnect_serial()
-            time.sleep(1)
-            self.connect_serial()
+            # Disconnect based on connection type
+            if self.connection_type == "serial":
+                self.disconnect_serial()
+                time.sleep(1)
+                self.connect_serial()
+            elif self.connection_type == "bluetooth":
+                self.disconnect_bluetooth()
+                time.sleep(1)
+                self.connect_bluetooth()
         else:
-            # User chose not to reconnect, clean up connection
-            self.disconnect_serial()
+            # User chose not to reconnect, clean up connection based on type
+            if self.connection_type == "serial":
+                self.disconnect_serial()
+            elif self.connection_type == "bluetooth":
+                self.disconnect_bluetooth()
     
     def start_monitoring(self):
         """Start connection monitoring thread"""
@@ -904,16 +1060,17 @@ class GolfSwingAnalyzer:
         
         if filename:
             try:
+                data_point_count = len(self.current_data)
                 with open(filename, 'w') as f:
                     json.dump({
                         'timestamp': datetime.now().isoformat(),
-                        'data_points': len(self.current_data),
+                        'data_points': data_point_count,
                         'filter_config': self.viz_filter_config,
                         'data': self.current_data
                     }, f, indent=2)
                 self.current_filename = filename  # Store the filename
                 self.log_status(f"Data saved to {filename} with filter configuration")
-                messagebox.showinfo("Success", "Data saved successfully")
+                messagebox.showinfo("Success", f"{data_point_count} points saved successfully")
             except Exception as e:
                 messagebox.showerror("Save Error", str(e))
                 
