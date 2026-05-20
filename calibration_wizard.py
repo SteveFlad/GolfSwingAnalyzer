@@ -511,17 +511,167 @@ Click "Collect Data" when ready. Hold steady for 2 seconds.
         success = self.calibration.calibrate_from_positions(self.position_samples)
         
         if success:
-            messagebox.showinfo("Success", 
-                "Full calibration complete!\n\n" +
-                "The sensor orientation has been calibrated.\n" +
-                "Your sensor data will now be properly oriented to the club frame.")
-            if self.on_complete:
-                self.on_complete()
-            self.close()
+            # Calibration successful, now capture address reference
+            response = messagebox.askyesno("Calibration Complete", 
+                "Sensor orientation calibration complete!\n\n" +
+                "Would you like to set the address position reference?\n\n" +
+                "This will normalize all swing data so the club position\n" +
+                "at address is always 0,0,0 with 0° face angle.\n\n" +
+                "Recommended: Yes")
+            
+            if response:
+                self.capture_address_reference()
+            else:
+                # Skip address capture
+                if self.on_complete:
+                    self.on_complete()
+                self.close()
         else:
             messagebox.showerror("Error", 
                 "Calibration failed. Please try again.\n" +
                 "Make sure to hold the club steady in each position.")
+            self.close()
+    
+    def capture_address_reference(self):
+        """Capture address position for normalization"""
+        # Switch to quaternion mode
+        if hasattr(self.capture, 'disable_calibration_mode'):
+            self.capture.disable_calibration_mode()
+        
+        # Reset collection state
+        self.address_samples = []
+        self.sample_count = 0
+        self.target_samples = 50
+        
+        # Update UI
+        self.update_instructions("""FINAL STEP: Address Position Reference
+
+Place your club in the normal ADDRESS position:
+• Club head behind ball
+• Face square to target
+• Normal address posture
+• Hold steady
+
+This position will become your reference point (0,0,0).
+All swing measurements will be relative to this position.
+
+Click "Capture Address" when ready.""")
+        
+        self.start_btn.config(text="Capture Address", state="normal", 
+                             command=self.start_address_capture)
+        self.progress_var.set(0)
+    
+    def start_address_capture(self):
+        """Start capturing address position data"""
+        self.start_btn.config(state="disabled")
+        self.sample_count = 0
+        self.address_samples = []
+        self.update_instructions("Capturing address position... Hold steady!")
+        self.dialog.after(100, self.collect_address_samples)
+    
+    def collect_address_samples(self):
+        """Collect quaternion samples at address position"""
+        try:
+            # Get current quaternion data
+            if hasattr(self.capture, 'get_latest_raw_data'):
+                data = self.capture.get_latest_raw_data()
+                
+                if data and 'q0' in data:
+                    self.address_samples.append([data['q0'], data['q1'], data['q2'], data['q3']])
+                    self.sample_count += 1
+                    
+                    # Update progress
+                    progress = int((self.sample_count / self.target_samples) * 100)
+                    self.progress_var.set(progress)
+                    self.update_instructions(
+                        f"Capturing address position... Hold steady!\n\n" +
+                        f"Samples: {self.sample_count}/{self.target_samples}")
+        except Exception as e:
+            print(f"Error collecting address sample: {e}")
+        
+        # Check if done
+        if self.sample_count >= self.target_samples:
+            self.finish_address_capture()
+        else:
+            self.dialog.after(40, self.collect_address_samples)
+    
+    def finish_address_capture(self):
+        """Process and save address reference"""
+        if len(self.address_samples) < 20:
+            messagebox.showerror("Error",
+                "Not enough samples collected. Make sure device is connected.")
+            self.close()
+            return
+        
+        try:
+            # Calculate average quaternion
+            import numpy as np
+            from scipy.spatial.transform import Rotation as R
+            
+            # Import visualizer to calculate position and face angle
+            import sys
+            sys.path.insert(0, '.')
+            from visualizer import SwingVisualizer
+            
+            # Average quaternions (simple mean for now)
+            address_quat_avg = np.mean(self.address_samples, axis=0)
+            # Normalize
+            address_quat_avg = address_quat_avg / np.linalg.norm(address_quat_avg)
+            
+            # Calculate position using same method as visualizer
+            quat_scipy = np.array([address_quat_avg[1], address_quat_avg[2], address_quat_avg[3], address_quat_avg[0]])
+            rot = R.from_quat(quat_scipy)
+            
+            # Shaft vector in sensor frame
+            shaft_sensor = np.array([-1.0, 0.0, 0.0])
+            shaft_rotated = rot.apply(shaft_sensor)
+            
+            # Map to golf coordinates
+            golf_shaft = np.array([shaft_rotated[1], shaft_rotated[2], -shaft_rotated[0]])
+            
+            # Position = shaft direction * club length
+            club_length_m = 1.168  # 46" driver
+            address_position = golf_shaft * club_length_m
+            
+            # Calculate face angle
+            face_normal_sensor = np.array([0.0, 0.0, 1.0])
+            face_rotated = rot.apply(face_normal_sensor)
+            golf_face_normal = np.array([face_rotated[1], face_rotated[2], -face_rotated[0]])
+            
+            # Project onto X-Y plane
+            face_normal_xy = np.array([golf_face_normal[0], golf_face_normal[1], 0.0])
+            face_normal_xy_norm = np.linalg.norm(face_normal_xy)
+            
+            if face_normal_xy_norm > 1e-6:
+                face_normal_xy /= face_normal_xy_norm
+                angle_rad = np.arctan2(face_normal_xy[1], face_normal_xy[0])
+                angle_deg = np.degrees(angle_rad)
+                address_face_angle = 90 - angle_deg
+            else:
+                address_face_angle = 0.0
+            
+            # Save to calibration
+            success = self.calibration.set_address_reference(
+                address_quat_avg, address_position, address_face_angle)
+            
+            if success:
+                messagebox.showinfo("Success",
+                    f"Address reference captured!\n\n" +
+                    f"Position: X={address_position[0]:.3f}, Y={address_position[1]:.3f}, Z={address_position[2]:.3f} m\n" +
+                    f"Face angle: {address_face_angle:.2f}°\n\n" +
+                    f"All swing data will now be normalized to this reference.")
+                if self.on_complete:
+                    self.on_complete()
+                self.close()
+            else:
+                messagebox.showerror("Error", "Failed to save address reference.")
+                self.close()
+                
+        except Exception as e:
+            print(f"Error processing address reference: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", f"Failed to process address reference: {e}")
             self.close()
     
     def close(self):

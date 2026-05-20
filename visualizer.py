@@ -90,7 +90,7 @@ def _rotvec_to_quat_wxyz(rotvec):
 class SwingVisualizer:
     def __init__(self, data, coordinate_system='ground', deadband_deg=0.10, 
                  smoothing_window=5, noise_floor_percentile=25, filter_type='moving_average',
-                 filename=None, club_length_m=1.168):
+                 filename=None, club_length_m=1.168, calibration=None):
         """
         Initialize visualizer with quaternion data
         
@@ -112,6 +112,8 @@ class SwingVisualizer:
             Optional filename to display in window title
         club_length_m: float
             Club length in meters for converting angular to linear velocity (default 1.168m = 46" driver)
+        calibration: SensorCalibration or None
+            Calibration object with address reference data (if available)
         """
         self.data = data
         self.positions = []
@@ -125,6 +127,7 @@ class SwingVisualizer:
         self.filter_type = filter_type
         self.filename = filename
         self.club_length_m = club_length_m
+        self.calibration = calibration
         # Conversion factor: rad/s * club_length_m = m/s; m/s * 2.23694 = mph
         self.rad_to_mph = club_length_m * 2.23694
         # Conversion factor: meters to feet
@@ -197,51 +200,189 @@ class SwingVisualizer:
             smoothed_speeds = np.array(raw_speeds)
         
         # Build full trajectory by integrating rotational movement into linear path
-        # Each rotation moves the club head through space - we accumulate these movements
-        position = np.array([0.0, 0.0, 0.0])
-        prev_quat = None
-        movements_filtered = 0
-        movements_applied = 0
+        # Calculate club head positions using quaternion orientations
+        # Method: Each quaternion defines club shaft direction; multiply by length to get club head position
+        # Assumes grip is stationary at origin (simplified model)
         
         for i, point in enumerate(self.data):
             quat = _normalize_quaternion_wxyz(np.array([point['q0'], point['q1'], point['q2'], point['q3']]))
             speed = smoothed_speeds[i]
             
-            if prev_quat is not None:
-                # Calculate rotation vector between samples (axis-angle representation)
-                rotvec = _quat_delta_rotvec_wxyz(prev_quat, quat)
-                rotation_magnitude = np.linalg.norm(rotvec)
-                
-                # Apply deadband to filter very small movements
-                if rotation_magnitude > self.deadband_rad:
-                    # Convert rotation to linear displacement of club head
-                    # Rotation axis shows direction of swing, magnitude shows how much
-                    
-                    if self.coordinate_system == 'ground':
-                        # Rotate the axis from sensor frame to golf frame
-                        # Sensor X → Golf Z (height, INVERTED), Sensor Y → Golf X (target), Sensor Z → Golf Y (in/out)
-                        rotation_axis = rotvec / rotation_magnitude if rotation_magnitude > 0 else rotvec
-                        golf_axis = np.array([rotation_axis[1], rotation_axis[2], -rotation_axis[0]])
-                        
-                        # Linear displacement = rotation magnitude * club length * rotation axis
-                        # (approximation for small angles, exact for large swings)
-                        delta_position = golf_axis * rotation_magnitude * self.club_length_m
-                    else:
-                        # Club frame: direct rotation vector to displacement
-                        delta_position = rotvec * self.club_length_m
-                    
-                    # INTEGRATE: Add delta to accumulated position to build trajectory
-                    position = position + delta_position
-                    movements_applied += 1
-                else:
-                    movements_filtered += 1
+            # Define club shaft vector in sensor frame (pointing from grip toward club head)
+            # Sensor is mounted on club head; assume shaft points along sensor's -X axis
+            shaft_sensor = np.array([-1.0, 0.0, 0.0])  # Unit vector along shaft
+            
+            # Rotate shaft vector by quaternion to get current orientation
+            # Convert wxyz to scipy convention (xyzw) for rotation
+            quat_scipy = np.array([quat[1], quat[2], quat[3], quat[0]])
+            from scipy.spatial.transform import Rotation as R
+            rot = R.from_quat(quat_scipy)
+            shaft_rotated = rot.apply(shaft_sensor)
+            
+            # Map sensor coordinates to golf coordinates
+            # Sensor X → Golf -Z (height, inverted), Sensor Y → Golf X (target), Sensor Z → Golf Y (in/out)
+            golf_shaft = np.array([shaft_rotated[1], shaft_rotated[2], -shaft_rotated[0]])
+            
+            # Club head position = grip position (origin) + shaft direction * club length
+            position = golf_shaft * self.club_length_m
             
             self.velocities.append(speed)
-            self.positions.append(position.copy())
-            prev_quat = quat
+            self.positions.append(position)
             
         self.positions = np.array(self.positions)
         self.velocities = np.array(self.velocities)
+        
+        # Check for stored address reference from calibration
+        # If not available, detect address position from data
+        if hasattr(self, 'calibration') and self.calibration and self.calibration.has_address_reference:
+            # Use stored address reference from calibration
+            self.address_position_raw = self.calibration.address_position.copy()
+            self.address_face_angle_raw = self.calibration.address_face_angle
+            self.address_idx = 0  # Not applicable when using stored reference
+            
+            print(f"\n=== Using Stored Address Reference ===")
+            print(f"Position: X={self.address_position_raw[0]:.3f}, Y={self.address_position_raw[1]:.3f}, Z={self.address_position_raw[2]:.3f} m")
+            print(f"Face angle: {self.address_face_angle_raw:.2f}°")
+        else:
+            # Detect address position from data (fallback)
+            self.address_idx = self._detect_address_position(self.velocities)
+            self.address_position_raw = self.positions[self.address_idx].copy()
+            
+            print(f"\n=== Address Position Detection (No Calibration Reference) ===")
+            print(f"Address detected at sample #{self.address_idx}")
+            print(f"Raw address position: X={self.address_position_raw[0]:.3f}, Y={self.address_position_raw[1]:.3f}, Z={self.address_position_raw[2]:.3f} m")
+            print("⚠ Warning: Using detected address. Run calibration wizard to set permanent reference.")
+            
+            # We'll calculate face angle after building face_angles array (below)
+            self.address_face_angle_raw = None
+        
+        # Calculate club face angles relative to target line at each point
+        self.face_angles = []
+        for i, point in enumerate(self.data):
+            quat = _normalize_quaternion_wxyz(np.array([point['q0'], point['q1'], point['q2'], point['q3']]))
+            
+            # Define club face normal vector in sensor frame (pointing perpendicular to face)
+            # Assume face normal points along sensor's Z axis
+            face_normal_sensor = np.array([0.0, 0.0, 1.0])
+            
+            # Rotate face normal by quaternion to get current orientation
+            quat_scipy = np.array([quat[1], quat[2], quat[3], quat[0]])
+            from scipy.spatial.transform import Rotation as R
+            rot = R.from_quat(quat_scipy)
+            face_rotated = rot.apply(face_normal_sensor)
+            
+            # Map sensor coordinates to golf coordinates
+            # Sensor X → Golf -Z, Sensor Y → Golf X, Sensor Z → Golf Y
+            golf_face_normal = np.array([face_rotated[1], face_rotated[2], -face_rotated[0]])
+            
+            # Calculate angle relative to target line (X-axis)
+            # Target line is along X-axis (positive X = right for right-handed golfer)
+            target_line = np.array([1.0, 0.0, 0.0])
+            
+            # Project face normal onto X-Y plane (ignore height component)
+            face_normal_xy = np.array([golf_face_normal[0], golf_face_normal[1], 0.0])
+            face_normal_xy_norm = np.linalg.norm(face_normal_xy)
+            
+            if face_normal_xy_norm > 1e-6:
+                face_normal_xy /= face_normal_xy_norm
+                
+                # Calculate angle using atan2 for proper sign
+                # Positive angle = face pointing left of target (closed for right-handed)
+                # Negative angle = face pointing right of target (open for right-handed)
+                angle_rad = np.arctan2(face_normal_xy[1], face_normal_xy[0])
+                angle_deg = np.degrees(angle_rad)
+                
+                # Adjust so 0° = square to target, positive = closed, negative = open
+                # Face normal pointing along target line (X+) means square
+                angle_deg = 90 - angle_deg  # Convert from standard angle to golf angle
+            else:
+                angle_deg = 0.0
+            
+            self.face_angles.append(angle_deg)
+        
+        self.face_angles = np.array(self.face_angles)
+        
+        # Get address face angle (from calibration or detected)
+        if self.address_face_angle_raw is None:
+            # Calculate from detected address position
+            if hasattr(self, 'address_idx'):
+                self.address_face_angle_raw = self.face_angles[self.address_idx]
+                print(f"Detected address face angle: {self.address_face_angle_raw:.2f}°")
+            else:
+                self.address_face_angle_raw = 0.0
+                print("Warning: No address index, using 0° as default face angle")
+        
+        print(f"Raw address face angle: {self.address_face_angle_raw:.2f}°")
+        
+        # Normalize positions: subtract address position so address becomes origin (0,0,0)
+        self.positions = self.positions - self.address_position_raw
+        
+        # Normalize face angles: subtract address face angle so address becomes 0°
+        self.face_angles = self.face_angles - self.address_face_angle_raw
+        
+        print(f"\n=== After Address Normalization ===")
+        if hasattr(self, 'address_idx'):
+            print(f"Address position now at: X={self.positions[self.address_idx][0]:.3f}, Y={self.positions[self.address_idx][1]:.3f}, Z={self.positions[self.address_idx][2]:.3f} m")
+            print(f"Address face angle now at: {self.face_angles[self.address_idx]:.2f}°")
+        else:
+            print(f"First sample position: X={self.positions[0][0]:.3f}, Y={self.positions[0][1]:.3f}, Z={self.positions[0][2]:.3f} m")
+            print(f"First sample face angle: {self.face_angles[0]:.2f}°")
+        
+        # Apply cubic spline interpolation to increase point density and reduce max jump
+        # This creates smoother trajectories with smaller gaps between samples
+        if len(self.positions) > 3:
+            from scipy.interpolate import CubicSpline
+            from scipy.spatial.transform import Rotation as R, Slerp
+            
+            # Store original length for impact index scaling
+            original_length = len(self.positions)
+            
+            # Interpolation factor: 4x means we'll have 4x as many points
+            interp_factor = 4
+            
+            # Original sample indices
+            t_original = np.arange(original_length)
+            
+            # New interpolated sample indices (4x denser)
+            t_interp = np.linspace(0, original_length - 1, original_length * interp_factor)
+            
+            # Create cubic splines for positions and scalar values
+            cs_x = CubicSpline(t_original, self.positions[:, 0])
+            cs_y = CubicSpline(t_original, self.positions[:, 1])
+            cs_z = CubicSpline(t_original, self.positions[:, 2])
+            cs_vel = CubicSpline(t_original, self.velocities)
+            cs_face = CubicSpline(t_original, self.face_angles)
+            
+            # Generate interpolated arrays
+            self.positions = np.column_stack([cs_x(t_interp), cs_y(t_interp), cs_z(t_interp)])
+            self.velocities = cs_vel(t_interp)
+            self.face_angles = cs_face(t_interp)
+            
+            # Interpolate orientations using quaternion slerp
+            # Convert orientations list to numpy array [w,x,y,z] -> [x,y,z,w] for scipy
+            orientations_array = np.array(self.orientations)
+            orientations_xyzw = orientations_array[:, [1, 2, 3, 0]]  # Reorder to [x,y,z,w]
+            
+            # Create Rotation object and Slerp interpolator
+            rotations = R.from_quat(orientations_xyzw)
+            slerp = Slerp(t_original, rotations)
+            
+            # Interpolate rotations
+            interp_rotations = slerp(t_interp)
+            
+            # Convert back to [w,x,y,z] format and store as list
+            interp_quat_xyzw = interp_rotations.as_quat()
+            interp_quat_wxyz = interp_quat_xyzw[:, [3, 0, 1, 2]]  # Reorder to [w,x,y,z]
+            self.orientations = [q for q in interp_quat_wxyz]
+            
+            # Store interpolation factor for later impact index scaling
+            self.interp_factor = interp_factor
+            self.original_length = original_length
+            
+            print(f"\nInterpolation applied: {original_length} → {len(self.positions)} samples ({interp_factor}x)")
+        else:
+            self.interp_factor = 1
+            self.original_length = len(self.positions)
         
         # Detect impact point (maximum speed with optional deceleration check)
         self.impact_idx = None
@@ -278,15 +419,10 @@ class SwingVisualizer:
                 else:
                     print(f"⚠ Max speed too low for impact detection: {max_speed_mph:.1f} mph")
         
-        # Normalize and scale trajectory to fit within defined 3D box
-        # Box limits: X [-5, 5], Y [0, 8], Z [0, 10] feet
-        # Address position (first sample) starts on ground behind ball
+        # Trajectory is already normalized: address at 0,0,0 with face angle at 0°
+        # Just verify bounds and optionally scale for better visualization
         if len(self.positions) > 0:
-            # Step 1: Normalize address to ground level (Z=0)
-            address_pos = self.positions[0].copy()
-            self.positions[:, 2] -= address_pos[2]  # Set address Z to 0
-            
-            # Step 2: Calculate trajectory bounds in meters
+            # Calculate trajectory bounds in meters (already normalized to address)
             x_min, x_max = np.min(self.positions[:, 0]), np.max(self.positions[:, 0])
             y_min, y_max = np.min(self.positions[:, 1]), np.max(self.positions[:, 1])
             z_min, z_max = np.min(self.positions[:, 2]), np.max(self.positions[:, 2])
@@ -295,79 +431,37 @@ class SwingVisualizer:
             y_range = y_max - y_min
             z_range = z_max - z_min
             
-            print(f"\n=== Raw Trajectory Bounds (meters) ===")
-            print(f"X: {x_min:.3f} to {x_max:.3f} (range: {x_range:.3f})")
-            print(f"Y: {y_min:.3f} to {y_max:.3f} (range: {y_range:.3f})")
-            print(f"Z: {z_min:.3f} to {z_max:.3f} (range: {z_range:.3f})")
+            print(f"\n=== Normalized Trajectory Bounds (meters) ===")
+            print(f"X (Target Line): {x_min:.3f} to {x_max:.3f} (range: {x_range:.3f})")
+            print(f"Y (In/Out):      {y_min:.3f} to {y_max:.3f} (range: {y_range:.3f})")
+            print(f"Z (Height):      {z_min:.3f} to {z_max:.3f} (range: {z_range:.3f})")
+            print(f"Address verified at: X={self.positions[self.address_idx][0]:.4f}, Y={self.positions[self.address_idx][1]:.4f}, Z={self.positions[self.address_idx][2]:.4f} m")
             
-            # Step 3: Define target box in feet and convert to meters
-            target_x_range = 10.0 / self.m_to_ft  # -5 to 5 feet
-            target_y_range = 10.0 / self.m_to_ft  # -2 to 8 feet
-            target_z_range = 10.0 / self.m_to_ft  # 0 to 10 feet
-            
-            # Step 4: Calculate scale factors for each axis
-            scale_x = target_x_range / x_range if x_range > 1e-6 else 1.0
-            scale_y = target_y_range / y_range if y_range > 1e-6 else 1.0
-            scale_z = target_z_range / z_range if z_range > 1e-6 else 1.0
-            
-            # Use uniform scaling (smallest scale factor) to preserve swing shape
-            uniform_scale = min(scale_x, scale_y, scale_z)
-            
-            print(f"\n=== Scaling Factors ===")
-            print(f"Individual scales - X: {scale_x:.3f}, Y: {scale_y:.3f}, Z: {scale_z:.3f}")
-            print(f"Uniform scale: {uniform_scale:.3f}")
-            
-            # Step 5: Apply uniform scaling
-            self.positions *= uniform_scale
-            
-            # Recalculate bounds after scaling
-            x_min, x_max = np.min(self.positions[:, 0]), np.max(self.positions[:, 0])
-            y_min, y_max = np.min(self.positions[:, 1]), np.max(self.positions[:, 1])
-            z_min, z_max = np.min(self.positions[:, 2]), np.max(self.positions[:, 2])
-            
-            # Step 6: Center X on target line (0)
-            x_center = (x_min + x_max) / 2
-            self.positions[:, 0] -= x_center
-            
-            # Step 7: Position Y so ball (impact) is at Y=0, with backswing extending to positive Y (away from ball)
-            if self.impact_idx is not None:
-                # Place ball exactly at Y=0
-                impact_y = self.positions[self.impact_idx, 1]
-                self.positions[:, 1] -= impact_y  # Shift so impact is at Y=0
-            else:
-                # No impact: use address position as reference (Y=0)
-                address_y = self.positions[0, 1]
-                self.positions[:, 1] -= address_y
-            
-            # Step 8: Ensure Z stays in [0, 10] range
-            self.positions[:, 2] -= z_min  # Ensure minimum is 0
-            
-            # Final bounds check
-            x_min_ft = np.min(self.positions[:, 0]) * self.m_to_ft
-            x_max_ft = np.max(self.positions[:, 0]) * self.m_to_ft
-            y_min_ft = np.min(self.positions[:, 1]) * self.m_to_ft
-            y_max_ft = np.max(self.positions[:, 1]) * self.m_to_ft
-            z_min_ft = np.min(self.positions[:, 2]) * self.m_to_ft
-            z_max_ft = np.max(self.positions[:, 2]) * self.m_to_ft
+            # Convert to feet for display
+            x_min_ft = x_min * self.m_to_ft
+            x_max_ft = x_max * self.m_to_ft
+            y_min_ft = y_min * self.m_to_ft
+            y_max_ft = y_max * self.m_to_ft
+            z_min_ft = z_min * self.m_to_ft
+            z_max_ft = z_max * self.m_to_ft
             
             if self.impact_idx is not None:
                 impact_ft = self.positions[self.impact_idx] * self.m_to_ft
-                ball_pos_str = f"({impact_ft[0]:.2f}, {impact_ft[1]:.2f}, {impact_ft[2]:.2f})"
+                ball_pos_str = f"X={impact_ft[0]:.2f} ft, Y={impact_ft[1]:.2f} ft, Z={impact_ft[2]:.2f} ft"
             else:
                 ball_pos_str = "N/A"
             
-            print(f"\n=== Scaled Trajectory Bounds (feet) ===")
-            print(f"X: {x_min_ft:.2f} to {x_max_ft:.2f} ft")
-            print(f"Y: {y_min_ft:.2f} to {y_max_ft:.2f} ft")
-            print(f"Z: {z_min_ft:.2f} to {z_max_ft:.2f} ft")
-            print(f"Ball position (impact): {ball_pos_str} ft")
+            print(f"\n=== Normalized Trajectory Bounds (feet, relative to address) ===")
+            print(f"X (Target Line): {x_min_ft:.2f} to {x_max_ft:.2f} ft")
+            print(f"Y (In/Out):      {y_min_ft:.2f} to {y_max_ft:.2f} ft")
+            print(f"Z (Height):      {z_min_ft:.2f} to {z_max_ft:.2f} ft")
+            print(f"Impact position: {ball_pos_str}")
         
         # Print diagnostic information
         print(f"\n=== Swing Data Analysis (Natural Golf Coordinates) ===")
         print(f"Total samples: {len(self.data)}")
         print(f"Position points: {len(self.positions)}")
-        print(f"Deadband filter: {self.deadband_deg:.2f}° ({np.rad2deg(self.deadband_rad):.2f}°)")
-        print(f"Movements applied: {movements_applied} / Filtered: {movements_filtered}")
+        print(f"Position calculation: Relative to address (0,0,0)")
         
         # Detailed speed diagnostics
         max_speed_raw = np.max(raw_speeds)
@@ -378,7 +472,7 @@ class SwingVisualizer:
         print(f"  Club length: {self.club_length_m:.3f} m ({self.club_length_m * self.m_to_ft:.2f} ft)")
         print(f"  Conversion factor: {self.rad_to_mph:.3f} mph per rad/s")
         
-        # Show first few quaternion differences to diagnose low movement
+        # Show first few quaternion samples to diagnose orientation
         if len(self.data) > 5:
             print(f"\nFirst few quaternion samples:")
             for i in range(min(5, len(self.data))):
@@ -391,17 +485,46 @@ class SwingVisualizer:
         total_distance = np.sum(np.linalg.norm(np.diff(self.positions, axis=0), axis=1))
         print(f"Total path length: {total_distance:.3f} m ({total_distance * self.m_to_ft:.2f} ft)")
         
-        # Warn if most movements were filtered out
-        total_movements = movements_applied + movements_filtered
-        if total_movements > 0 and movements_filtered / total_movements > 0.95:
-            print(f"\n⚠️  WARNING: {movements_filtered / total_movements * 100:.1f}% of movements filtered by deadband!")
-            print(f"    This data may have been captured with the deadband filter bug.")
-            print(f"    Try:")
-            print(f"    1. Set deadband to 0.00° in visualization settings")
-            print(f"    2. Or capture a NEW swing (fixes applied to capture)")
-        
         print("="*60)
         
+    def _detect_address_position(self, velocities):
+        """
+        Detect address position (club stationary behind ball before swing starts).
+        
+        Returns index of address position.
+        
+        Strategy:
+        - Look for low angular velocity period in first 20% of data
+        - Average over several samples to find most stable position
+        - Address should be early in capture with minimal movement
+        """
+        # Only search in first 20% of data (address is before swing)
+        search_end = min(len(velocities) // 5, len(velocities))
+        
+        if search_end < 5:
+            # Too few samples, use first sample
+            return 0
+        
+        # Convert velocities to mph for threshold
+        velocities_mph = velocities * self.rad_to_mph
+        
+        # Find periods with low velocity (< 5 mph movement)
+        low_velocity_threshold = 5.0  # mph
+        low_velocity_mask = velocities_mph[:search_end] < low_velocity_threshold
+        
+        if np.any(low_velocity_mask):
+            # Find the longest continuous low-velocity period
+            # This is likely the address position (stationary club)
+            address_candidates = np.where(low_velocity_mask)[0]
+            
+            if len(address_candidates) > 0:
+                # Average over the low-velocity period for stability
+                # Use middle of the low-velocity period
+                return address_candidates[len(address_candidates) // 2]
+        
+        # Fallback: use lowest velocity point in search range
+        return np.argmin(velocities_mph[:search_end])
+    
     def show(self):
         """Display the 3D visualization"""
         # Create maximized figure with filter info in title
@@ -416,34 +539,45 @@ class SwingVisualizer:
         
         # Create figure with custom layout using GridSpec
         from matplotlib.gridspec import GridSpec
-        fig = plt.figure(figsize=(16, 10))
+        fig = plt.figure(figsize=(18, 12))
         fig.canvas.manager.set_window_title(display_name)
         fig.suptitle(filter_info, fontsize=10, y=0.995)
         
         # Create custom grid: 3D plot takes left 2/3, other plots on right 1/3
         # Leave space at bottom for slider controls and scale
-        gs = GridSpec(3, 2, figure=fig, width_ratios=[2, 1], height_ratios=[1, 1, 1],
-                     hspace=0.5, wspace=0.3, top=0.96, bottom=0.17, left=0.05, right=0.98)
+        gs = GridSpec(4, 2, figure=fig, width_ratios=[2, 1], height_ratios=[1, 1, 1, 1],
+                     hspace=0.4, wspace=0.3, top=0.96, bottom=0.14, left=0.05, right=0.98)
         
-        # 3D trajectory plot - spans all 3 rows on the left (200% larger)
+        # 3D trajectory plot - spans all 4 rows on the left
         ax1 = fig.add_subplot(gs[:, 0], projection='3d')
         
         # Speed over time - top right
         ax2 = fig.add_subplot(gs[0, 1])
         
-        # Top view - middle right
-        ax3 = fig.add_subplot(gs[1, 1])
+        # Club face angle - second from top right
+        ax_face = fig.add_subplot(gs[1, 1])
+        
+        # Top view - third from top right
+        ax3 = fig.add_subplot(gs[2, 1])
         
         # Side view - bottom right
-        ax4 = fig.add_subplot(gs[2, 1])
+        ax4 = fig.add_subplot(gs[3, 1])
         
         # Store axes for update function
         self.fig = fig
-        self.axes = {'3d': ax1, 'speed': ax2, 'top': ax3, 'side': ax4}
+        self.axes = {'3d': ax1, 'speed': ax2, 'face': ax_face, 'top': ax3, 'side': ax4}
         
         # Create slider axes at bottom with proper spacing
-        ax_slider_start = fig.add_axes([0.15, 0.11, 0.65, 0.02])
-        ax_slider_end = fig.add_axes([0.15, 0.03, 0.65, 0.02])
+        ax_slider_start = fig.add_axes([0.15, 0.09, 0.65, 0.015])
+        ax_slider_end = fig.add_axes([0.15, 0.03, 0.65, 0.015])
+        
+        # Add coordinate system legend above sliders
+        ax_coords = fig.add_axes([0.15, 0.115, 0.30, 0.02])
+        ax_coords.axis('off')
+        coord_text = 'Golf Coordinates: X = Target Line (±left/right) | Y = In/Out (ball/away) | Z = Height (ground/up)'
+        ax_coords.text(0, 0.5, coord_text, fontsize=9, fontweight='bold', 
+                      ha='left', va='center', color='darkblue',
+                      bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
         
         # Create sliders
         total_samples = len(self.positions)
@@ -453,7 +587,7 @@ class SwingVisualizer:
                                  valinit=total_samples-1, valstep=1, color='lightblue')
         
         # Add scale indicator between sliders
-        ax_scale = fig.add_axes([0.15, 0.067, 0.65, 0.015])
+        ax_scale = fig.add_axes([0.15, 0.055, 0.65, 0.015])
         ax_scale.set_xlim(0, total_samples-1)
         ax_scale.set_ylim(0, 1)
         ax_scale.axis('off')
@@ -498,6 +632,7 @@ class SwingVisualizer:
             # Redraw with filtered range
             self.plot_trajectory(self.axes['3d'], start, end)
             self.plot_speed(self.axes['speed'], start, end)
+            self.plot_face_angle(self.axes['face'], start, end)
             self.plot_top_view(self.axes['top'], start, end)
             self.plot_side_view(self.axes['side'], start, end)
             
@@ -536,12 +671,12 @@ class SwingVisualizer:
             
             btn_impact.on_clicked(focus_impact)
         
-        # Add 3D View Preset Buttons (positioned below Top View, left of Side View)
+        # Add 3D View Preset Buttons (positioned in the right column)
         btn_width = 0.10
-        btn_height = 0.032
+        btn_height = 0.028
         btn_x = 0.605  # Left edge of right column
-        btn_y_start = 0.32  # Below Top View, above Side View
-        btn_spacing = 0.042
+        btn_y_start = 0.26  # Positioned between Face Angle and Top View graphs
+        btn_spacing = 0.038
         
         # Add label for view buttons
         ax_view_label = fig.add_axes([btn_x, btn_y_start + 0.04, btn_width, 0.02])
@@ -555,9 +690,9 @@ class SwingVisualizer:
         
         def view_face(event):
             # View from behind golfer looking toward ball with floor plane visible
-            # elev=15 looks down from above to see floor plane (X-Y grid at Z=0)
+            # elev=0 horizontal view at eye level
             # azim=0 looks down the Y-axis (in/out), target line (X) at bottom
-            self.axes['3d'].view_init(elev=15, azim=0, roll=0)
+            self.axes['3d'].view_init(elev=0, azim=0, roll=0)
             fig.canvas.draw_idle()
         
         btn_face.on_clicked(view_face)
@@ -567,7 +702,8 @@ class SwingVisualizer:
         btn_dtl = Button(ax_btn_dtl, 'Down-Line', color='lightblue', hovercolor='skyblue')
         
         def view_dtl(event):
-            self.axes['3d'].view_init(elev=-15, azim=0, roll=0)
+            # Opposite direction from Side View
+            self.axes['3d'].view_init(elev=0, azim=180, roll=0)
             fig.canvas.draw_idle()
         
         btn_dtl.on_clicked(view_dtl)
@@ -596,6 +732,7 @@ class SwingVisualizer:
         # Plot all views with full range initially
         self.plot_trajectory(ax1, 0, total_samples-1)
         self.plot_speed(ax2, 0, total_samples-1)
+        self.plot_face_angle(ax_face, 0, total_samples-1)
         self.plot_top_view(ax3, 0, total_samples-1)
         self.plot_side_view(ax4, 0, total_samples-1)
         
@@ -693,16 +830,27 @@ class SwingVisualizer:
                    str(actual_sample), fontsize=8, color='black')
         
         # Mark start and end of visible range
-        ax.scatter(*positions_ft[0], color='green', s=100, marker='o', 
+        start_pos_ft = positions_ft[0]
+        end_pos_ft = positions_ft[-1]
+        ax.scatter(*start_pos_ft, color='green', s=100, marker='o', 
                   label=f'Start (#{start_idx})', zorder=10)
-        ax.scatter(*positions_ft[-1], color='red', s=100, marker='X', 
+        ax.scatter(*end_pos_ft, color='red', s=100, marker='X', 
                   label=f'End (#{end_idx})', zorder=10)
         
         # Mark impact point and ball if detected and within visible range
+        impact_data = None  # Store impact data for diagnostic box
         if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
             relative_impact_idx = self.impact_idx - start_idx
             impact_pos = positions_ft[relative_impact_idx]
             impact_speed = velocities[relative_impact_idx] * self.rad_to_mph
+            impact_face_angle = self.face_angles[self.impact_idx]
+            
+            # Store impact data for diagnostic box
+            impact_data = {
+                'pos': impact_pos,
+                'speed': impact_speed,
+                'angle': impact_face_angle
+            }
             
             # Ball marker at impact position
             ax.scatter(impact_pos[0], impact_pos[1], impact_pos[2], 
@@ -713,11 +861,7 @@ class SwingVisualizer:
             ax.scatter(impact_pos[0], impact_pos[1], impact_pos[2], 
                       color='gold', s=400, marker='*', 
                       edgecolors='orange', linewidths=2,
-                      label=f'Impact (#{self.impact_idx}, {impact_speed:.1f} mph)', zorder=15)
-            # Add impact label
-            ax.text(impact_pos[0], impact_pos[1], impact_pos[2] + 0.2, 
-                   'IMPACT', fontsize=12, fontweight='bold', 
-                   color='orange', ha='center', zorder=16)
+                      label=f'Impact (#{self.impact_idx})', zorder=15)
         
         # Calculate trajectory bounds for arrow scaling (in feet)
         x_range = np.ptp(positions_ft[:, 0]) if len(positions_ft) > 1 else 1.0
@@ -768,10 +912,14 @@ class SwingVisualizer:
         
         # Set labels for natural golf coordinate system
         if self.coordinate_system == 'ground':
-            ax.set_xlabel('Target Line (ft)\n← Left | Right →', fontsize=10, fontweight='bold')
-            ax.set_ylabel('In/Out (ft)\n← Ball | Away →', fontsize=10, fontweight='bold')
-            ax.set_zlabel('Height (ft)\n← Ground | Up →', fontsize=10, fontweight='bold')
-            ax.set_title('3D Club Head Trajectory\n(Scaled to fit viewing box)', fontsize=11, fontweight='bold')
+            ax.set_xlabel('TARGET LINE (X-axis, feet)\n← Left of Target | Right of Target →', 
+                         fontsize=11, fontweight='bold', labelpad=10)
+            ax.set_ylabel('IN/OUT (Y-axis, feet)\n← Ball/Target | Away from Ball →', 
+                         fontsize=11, fontweight='bold', labelpad=10)
+            ax.set_zlabel('HEIGHT (Z-axis, feet)\n← Ground | Up →', 
+                         fontsize=11, fontweight='bold', labelpad=10)
+            ax.set_title('3D Club Head Trajectory\n(Golf Coordinates: Target Line, In/Out, Height)', 
+                        fontsize=12, fontweight='bold', pad=15)
         else:
             ax.set_xlabel('Shaft (ft)')
             ax.set_ylabel('Face Normal (ft)')
@@ -789,11 +937,44 @@ class SwingVisualizer:
         total_path_ft = np.sum(np.linalg.norm(np.diff(positions_ft, axis=0), axis=1))
         max_jump = np.max(np.linalg.norm(np.diff(positions_ft, axis=0), axis=1)) if len(positions_ft) > 1 else 0
         
-        diag_text = (f'Range: X={x_range_ft:.1f}ft Y={y_range_ft:.1f}ft Z={z_range_ft:.1f}ft\n'
-                    f'Path: {total_path_ft:.1f}ft | Max jump: {max_jump:.2f}ft')
+        # Get address position in feet for display
+        address_idx = self.address_idx if hasattr(self, 'address_idx') else 0
+        if start_idx <= address_idx <= end_idx:
+            # Address is in visible range
+            address_visible = True
+            address_pos_ft = positions_ft[address_idx - start_idx]
+        else:
+            address_visible = False
+            address_pos_ft = positions_ft[0]  # Fallback
+        
+        # Build diagnostic text with address and optional impact data
+        diag_text = (f'📍 ADDRESS POSITION:\n'
+                    f'  X: {address_pos_ft[0]:+.2f} ft\n'
+                    f'  Y: {address_pos_ft[1]:+.2f} ft\n'
+                    f'  Z: {address_pos_ft[2]:+.2f} ft\n'
+                    f'  Face: {self.face_angles[address_idx]:+.1f}°\n'
+                    f'\nTrajectory Ranges:\n'
+                    f'  Target Line (X): {x_range_ft:.2f} ft\n'
+                    f'  In/Out (Y): {y_range_ft:.2f} ft\n'
+                    f'  Height (Z): {z_range_ft:.2f} ft\n'
+                    f'Total Path: {total_path_ft:.1f} ft\n'
+                    f'Max Jump: {max_jump:.2f} ft')
+        
+        # Add impact data if available
+        if impact_data is not None:
+            impact_text = (f'\n\n★ IMPACT DATA ★\n'
+                          f'Position:\n'
+                          f'  X: {impact_data["pos"][0]:+.2f} ft\n'
+                          f'  Y: {impact_data["pos"][1]:+.2f} ft\n'
+                          f'  Z: {impact_data["pos"][2]:+.2f} ft\n'
+                          f'Speed: {impact_data["speed"]:.1f} mph\n'
+                          f'Face: {impact_data["angle"]:+.1f}°')
+            diag_text += impact_text
+        
         ax.text2D(0.02, 0.98, diag_text, transform=ax.transAxes, 
-                 fontsize=8, verticalalignment='top', family='monospace',
-                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                 fontsize=9, verticalalignment='top', family='monospace',
+                 bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8, 
+                          edgecolor='gray', linewidth=1))
         
         # Place legend in lower left to avoid overlap with diagnostic text in upper left
         ax.legend(loc='lower left', fontsize=8, framealpha=0.9)
@@ -851,6 +1032,58 @@ class SwingVisualizer:
         ax.set_title('Club Head Speed')
         ax.grid(True, alpha=0.3)
         ax.legend()
+    
+    def plot_face_angle(self, ax, start_idx=None, end_idx=None):
+        """Plot club face angle relative to target line over time
+        
+        Args:
+            ax: Axis to plot on
+            start_idx: Starting sample index (default: 0)
+            end_idx: Ending sample index (default: len-1)
+        """
+        if start_idx is None:
+            start_idx = 0
+        if end_idx is None:
+            end_idx = len(self.face_angles) - 1
+        
+        # Filter data to selected range
+        face_angles = self.face_angles[start_idx:end_idx+1]
+        time = np.arange(start_idx, end_idx+1)
+        
+        # Plot face angle
+        ax.plot(time, face_angles, 'g-', linewidth=2, label='Face Angle')
+        ax.fill_between(time, face_angles, alpha=0.2, color='green')
+        
+        # Add reference line at 0° (square to target)
+        ax.axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=2, label='Square (0°)')
+        
+        # Mark setup position (first sample)
+        setup_angle = face_angles[0]
+        ax.plot(start_idx, setup_angle, 'bo', markersize=10, 
+               label=f'Setup: {setup_angle:.1f}°', zorder=10)
+        
+        # Mark impact (if detected and within visible range)
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            relative_impact_idx = self.impact_idx - start_idx
+            impact_angle = face_angles[relative_impact_idx]
+            ax.plot(self.impact_idx, impact_angle, 
+                   'ro', markersize=15, markeredgewidth=2, 
+                   markeredgecolor='orange', label=f'Impact: {impact_angle:.1f}°',
+                   zorder=10)
+            ax.axvline(self.impact_idx, color='orange', linestyle='--', alpha=0.5, linewidth=2)
+        
+        # Shade regions for open/closed face
+        y_min, y_max = ax.get_ylim()
+        ax.fill_between([start_idx, end_idx+1], 0, y_max, alpha=0.1, color='blue', 
+                        label='Closed (Left)')
+        ax.fill_between([start_idx, end_idx+1], y_min, 0, alpha=0.1, color='red', 
+                        label='Open (Right)')
+        
+        ax.set_xlabel('Sample Number')
+        ax.set_ylabel('Face Angle (degrees)')
+        ax.set_title('Club Face Angle vs Target Line\n(+Closed / -Open)')
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7, loc='upper right')
         
     def plot_top_view(self, ax, start_idx=None, end_idx=None):
         """Plot top-down view (X-Y plane: target line and in/out)
@@ -920,9 +1153,9 @@ class SwingVisualizer:
                 arrowprops=dict(arrowstyle='->', color='red', lw=1, alpha=0.5)
             )
         
-        ax.set_xlabel('Target Line (ft)')
-        ax.set_ylabel('In/Out (ft)')
-        ax.set_title('Top View (X-Y Plane)', fontsize=10)
+        ax.set_xlabel('Target Line (X-axis, feet)\n← Left | Right →', fontsize=9, fontweight='bold')
+        ax.set_ylabel('In/Out (Y-axis, feet)\n← Ball | Away →', fontsize=9, fontweight='bold')
+        ax.set_title('Top View: Target Line vs In/Out\n(Looking down from above)', fontsize=10, fontweight='bold')
         ax.set_xlim(-5, 5)
         ax.set_ylim(-2, 8)
         # ax.set_aspect('equal')  # Disabled to accommodate extended target line range
@@ -980,9 +1213,9 @@ class SwingVisualizer:
                       edgecolors='orange', linewidths=2,
                       label=f'Impact (#{self.impact_idx})', zorder=10)
         
-        ax.set_xlabel('In/Out (ft)')
-        ax.set_ylabel('Height (ft)')
-        ax.set_title('Side View (Y-Z Plane)', fontsize=10)
+        ax.set_xlabel('In/Out (Y-axis, feet)\n← Ball | Away →', fontsize=9, fontweight='bold')
+        ax.set_ylabel('Height (Z-axis, feet)\n← Ground | Up →', fontsize=9, fontweight='bold')
+        ax.set_title('Side View: In/Out vs Height\n(Looking from target line)', fontsize=10, fontweight='bold')
         ax.set_xlim(-2, 8)
         ax.set_ylim(0, 10)
         ax.axhline(y=0, color='blue', linestyle='--', alpha=0.3, linewidth=1)  # Ground level

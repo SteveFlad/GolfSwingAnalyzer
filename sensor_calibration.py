@@ -22,6 +22,13 @@ class SensorCalibration:
         self.axis_signs = np.array([1, 1, 1])  # No sign flips
         self.gravity_reference = np.array([0, 0, 9.81])  # Expected gravity in club frame
         self.is_calibrated = False
+        
+        # Address position reference (captured during calibration)
+        self.address_quaternion = None  # [w, x, y, z] at address
+        self.address_position = None  # [x, y, z] in meters (club head position at address)
+        self.address_face_angle = None  # Face angle in degrees at address
+        self.has_address_reference = False
+        
         self.load_calibration()
     
     def load_calibration(self):
@@ -34,6 +41,17 @@ class SensorCalibration:
                     self.axis_signs = np.array(data['axis_signs'])
                     self.gravity_reference = np.array(data['gravity_reference'])
                     self.is_calibrated = data.get('is_calibrated', False)
+                    
+                    # Load address reference if available
+                    if 'address_quaternion' in data:
+                        self.address_quaternion = np.array(data['address_quaternion'])
+                        self.address_position = np.array(data.get('address_position', [0, 0, 0]))
+                        self.address_face_angle = data.get('address_face_angle', 0.0)
+                        self.has_address_reference = True
+                        print(f"Loaded address reference: pos={self.address_position}, face={self.address_face_angle}°")
+                    else:
+                        self.has_address_reference = False
+                    
                     print(f"Loaded calibration from {self.calibration_file}")
                     return True
             except Exception as e:
@@ -50,6 +68,14 @@ class SensorCalibration:
                 'is_calibrated': self.is_calibrated,
                 'timestamp': time.time()
             }
+            
+            # Add address reference if captured
+            if self.has_address_reference and self.address_quaternion is not None:
+                data['address_quaternion'] = self.address_quaternion.tolist()
+                data['address_position'] = self.address_position.tolist()
+                data['address_face_angle'] = float(self.address_face_angle)
+                data['has_address_reference'] = True
+            
             with open(self.calibration_file, 'w') as f:
                 json.dump(data, f, indent=2)
             print(f"Calibration saved to {self.calibration_file}")
@@ -277,10 +303,44 @@ class SensorCalibration:
         # For now, return as-is (this is a simplification)
         return np.array(quat_sensor)
     
+    def set_address_reference(self, quaternion, position, face_angle):
+        """
+        Set address position reference for normalization
+        
+        Parameters:
+        -----------
+        quaternion : array-like
+            Quaternion at address [w, x, y, z]
+        position : array-like
+            Club head position at address [x, y, z] in meters
+        face_angle : float
+            Face angle in degrees at address
+        
+        Returns:
+        --------
+        bool: True if successful
+        """
+        try:
+            self.address_quaternion = np.array(quaternion)
+            self.address_position = np.array(position)
+            self.address_face_angle = float(face_angle)
+            self.has_address_reference = True
+            
+            print(f"Address reference set:")
+            print(f"  Quaternion: {self.address_quaternion}")
+            print(f"  Position: {self.address_position} m")
+            print(f"  Face angle: {self.address_face_angle}°")
+            
+            return self.save_calibration()
+        except Exception as e:
+            print(f"Failed to set address reference: {e}")
+            return False
+    
     def get_calibration_status(self):
         """Return calibration status as string"""
         if self.is_calibrated:
-            return "Calibrated"
+            addr_status = " + Address" if self.has_address_reference else ""
+            return f"Calibrated{addr_status}"
         else:
             return "Not Calibrated"
     

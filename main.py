@@ -1209,7 +1209,8 @@ class GolfSwingAnalyzer:
                 smoothing_window=dialog.result['smoothing_window'],
                 noise_floor_percentile=dialog.result['noise_floor'],
                 filter_type=dialog.result['filter_type'],
-                filename=self.current_filename
+                filename=self.current_filename,
+                calibration=self.calibration  # Pass calibration for address reference
             )
             self.log_status("Showing visualization window...")
             

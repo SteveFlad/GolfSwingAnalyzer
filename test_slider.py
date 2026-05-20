@@ -5,6 +5,10 @@ Test slider functionality with filtered data range
 import json
 import numpy as np
 from visualizer import SwingVisualizer
+from sensor_calibration import SensorCalibration
+
+# Load calibration if available
+calibration = SensorCalibration('calibration_data.json')
 
 # Load data
 with open('data/ClubHeadData.json', 'r') as f:
@@ -12,8 +16,8 @@ with open('data/ClubHeadData.json', 'r') as f:
 
 print(f"Loaded {len(data['data'])} samples")
 
-# Create visualizer
-viz = SwingVisualizer(data['data'])
+# Create visualizer with calibration
+viz = SwingVisualizer(data['data'], calibration=calibration)
 
 print("\nProcessing data...")
 # Data is already processed in __init__
