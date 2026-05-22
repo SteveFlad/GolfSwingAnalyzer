@@ -656,7 +656,6 @@ class GolfSwingAnalyzer:
             self.connection_label.config(text=f"Status: Connected to {port} (USB)", foreground="green")
             self.connect_btn.config(text="Disconnect")
             self.log_status(f"Connected to {port} via USB/Serial")
-            self._set_capture_button_enabled(True)
             self.start_monitoring()
         except Exception as e:
             messagebox.showerror("Connection Error", str(e))

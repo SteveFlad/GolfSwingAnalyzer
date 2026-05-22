@@ -232,22 +232,20 @@ class SwingVisualizer:
         self.positions = np.array(self.positions)
         self.velocities = np.array(self.velocities)
         
-        # Check for stored address reference from calibration
-        # If not available, detect address position from data
+        # Always detect address position from the swing data
+        # The stored address reference is used for face angle normalization only
+        self.address_idx = self._detect_address_position(self.velocities)
+        self.address_position_raw = self.positions[self.address_idx].copy()
+        
         if hasattr(self, 'calibration') and self.calibration and self.calibration.has_address_reference:
-            # Use stored address reference from calibration
-            self.address_position_raw = self.calibration.address_position.copy()
+            # Use stored address face angle from calibration
             self.address_face_angle_raw = self.calibration.address_face_angle
-            self.address_idx = 0  # Not applicable when using stored reference
             
             print(f"\n=== Using Stored Address Reference ===")
+            print(f"Address detected at sample #{self.address_idx}")
             print(f"Position: X={self.address_position_raw[0]:.3f}, Y={self.address_position_raw[1]:.3f}, Z={self.address_position_raw[2]:.3f} m")
-            print(f"Face angle: {self.address_face_angle_raw:.2f}°")
+            print(f"Stored face angle: {self.address_face_angle_raw:.2f}°")
         else:
-            # Detect address position from data (fallback)
-            self.address_idx = self._detect_address_position(self.velocities)
-            self.address_position_raw = self.positions[self.address_idx].copy()
-            
             print(f"\n=== Address Position Detection (No Calibration Reference) ===")
             print(f"Address detected at sample #{self.address_idx}")
             print(f"Raw address position: X={self.address_position_raw[0]:.3f}, Y={self.address_position_raw[1]:.3f}, Z={self.address_position_raw[2]:.3f} m")
