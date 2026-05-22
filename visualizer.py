@@ -888,27 +888,46 @@ class SwingVisualizer:
                     color='darkred', alpha=0.6, arrow_length_ratio=0.8, linewidth=2.5
                 )
         
-        # Set fixed axis limits: X (target line) -5 to 5, Y (in/out) -2 to 8, Z (height) 0 to 10
-        ax.set_xlim(-5, 5)
-        ax.set_ylim(-2, 8)
-        ax.set_zlim(0, 10)
+        # Set dynamic axis limits based on actual data range with padding
+        x_min_ft, x_max_ft = np.min(positions_ft[:, 0]), np.max(positions_ft[:, 0])
+        y_min_ft, y_max_ft = np.min(positions_ft[:, 1]), np.max(positions_ft[:, 1])
+        z_min_ft, z_max_ft = np.min(positions_ft[:, 2]), np.max(positions_ft[:, 2])
+        
+        # Add 20% padding to each axis
+        x_padding = max(0.5, (x_max_ft - x_min_ft) * 0.2)  # At least 0.5 ft padding
+        y_padding = max(0.5, (y_max_ft - y_min_ft) * 0.2)
+        z_padding = max(0.5, (z_max_ft - z_min_ft) * 0.2)
+        
+        # Ensure Z axis starts at ground (0) if club goes below 1 ft
+        z_min_display = 0 if z_min_ft < 1.0 else z_min_ft - z_padding
+        
+        ax.set_xlim(x_min_ft - x_padding, x_max_ft + x_padding)
+        ax.set_ylim(y_min_ft - y_padding, y_max_ft + y_padding)
+        ax.set_zlim(z_min_display, z_max_ft + z_padding)
         
         # Draw ground plane (X-Y plane at Z=0) and grid boundaries
         if self.coordinate_system == 'ground':
             from matplotlib.patches import Rectangle
             from mpl_toolkits.mplot3d import art3d
             
+            # Get dynamic axis limits
+            x_min, x_max = ax.get_xlim()
+            y_min, y_max = ax.get_ylim()
+            
             # Create ground plane boundary at Z=0
-            ground_x = [-5, 5, 5, -5, -5]
-            ground_y = [-2, -2, 8, 8, -2]
+            ground_x = [x_min, x_max, x_max, x_min, x_min]
+            ground_y = [y_min, y_min, y_max, y_max, y_min]
             ground_z = [0, 0, 0, 0, 0]
             ax.plot(ground_x, ground_y, ground_z, 'k-', alpha=0.3, linewidth=1)
             
             # Add grid on ground plane (every 1 foot)
-            for x_grid in range(-5, 6):
-                ax.plot([x_grid, x_grid], [-2, 8], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
-            for y_grid in range(-2, 9):
-                ax.plot([-5, 5], [y_grid, y_grid], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
+            x_min_int, x_max_int = int(np.floor(x_min)), int(np.ceil(x_max))
+            y_min_int, y_max_int = int(np.floor(y_min)), int(np.ceil(y_max))
+            
+            for x_grid in range(x_min_int, x_max_int + 1):
+                ax.plot([x_grid, x_grid], [y_min, y_max], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
+            for y_grid in range(y_min_int, y_max_int + 1):
+                ax.plot([x_min, x_max], [y_grid, y_grid], [0, 0], 'k-', alpha=0.1, linewidth=0.5)
         
         # Set labels for natural golf coordinate system
         if self.coordinate_system == 'ground':
@@ -1156,8 +1175,15 @@ class SwingVisualizer:
         ax.set_xlabel('Target Line (X-axis, feet)\n← Left | Right →', fontsize=9, fontweight='bold')
         ax.set_ylabel('In/Out (Y-axis, feet)\n← Ball | Away →', fontsize=9, fontweight='bold')
         ax.set_title('Top View: Target Line vs In/Out\n(Looking down from above)', fontsize=10, fontweight='bold')
-        ax.set_xlim(-5, 5)
-        ax.set_ylim(-2, 8)
+        
+        # Dynamic axis limits with padding
+        x_min_ft, x_max_ft = np.min(positions_ft[:, 0]), np.max(positions_ft[:, 0])
+        y_min_ft, y_max_ft = np.min(positions_ft[:, 1]), np.max(positions_ft[:, 1])
+        x_padding = max(0.5, (x_max_ft - x_min_ft) * 0.2)
+        y_padding = max(0.5, (y_max_ft - y_min_ft) * 0.2)
+        
+        ax.set_xlim(x_min_ft - x_padding, x_max_ft + x_padding)
+        ax.set_ylim(y_min_ft - y_padding, y_max_ft + y_padding)
         # ax.set_aspect('equal')  # Disabled to accommodate extended target line range
         ax.grid(True, alpha=0.3)
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=7, framealpha=0.9)
@@ -1216,8 +1242,16 @@ class SwingVisualizer:
         ax.set_xlabel('In/Out (Y-axis, feet)\n← Ball | Away →', fontsize=9, fontweight='bold')
         ax.set_ylabel('Height (Z-axis, feet)\n← Ground | Up →', fontsize=9, fontweight='bold')
         ax.set_title('Side View: In/Out vs Height\n(Looking from target line)', fontsize=10, fontweight='bold')
-        ax.set_xlim(-2, 8)
-        ax.set_ylim(0, 10)
+        
+        # Dynamic axis limits with padding
+        y_min_ft, y_max_ft = np.min(positions_ft[:, 1]), np.max(positions_ft[:, 1])
+        z_min_ft, z_max_ft = np.min(positions_ft[:, 2]), np.max(positions_ft[:, 2])
+        y_padding = max(0.5, (y_max_ft - y_min_ft) * 0.2)
+        z_padding = max(0.5, (z_max_ft - z_min_ft) * 0.2)
+        z_min_display = 0 if z_min_ft < 1.0 else z_min_ft - z_padding
+        
+        ax.set_xlim(y_min_ft - y_padding, y_max_ft + y_padding)
+        ax.set_ylim(z_min_display, z_max_ft + z_padding)
         ax.axhline(y=0, color='blue', linestyle='--', alpha=0.3, linewidth=1)  # Ground level
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)

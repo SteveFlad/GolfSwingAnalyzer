@@ -273,6 +273,16 @@ class BLECapture:
                 
                 self.total_parsed += 1
                 
+                # Store quaternion data too so get_latest_raw_data() returns current data
+                self.latest_raw_data = {
+                    'q0': q0,
+                    'q1': q1,
+                    'q2': q2,
+                    'q3': q3,
+                    'timestamp': time.time(),
+                    'type': 'quaternion'
+                }
+                
                 if self.data_callback:
                     self.data_callback((q0, q1, q2, q3))
             

@@ -311,12 +311,21 @@ Click "Collect" when ready. Keep the club steady for 2 seconds.
         success = self.calibration.calibrate_simple(self.position_samples['address'])
         
         if success:
-            messagebox.showinfo("Success", 
-                "Simple calibration complete!\n\n" +
-                "The sensor has been calibrated for basic orientation.")
-            if self.on_complete:
-                self.on_complete()
-            self.close()
+            # Calibration successful, now capture address reference
+            response = messagebox.askyesno("Calibration Complete", 
+                "Sensor orientation calibration complete!\n\n" +
+                "Would you like to set the address position reference?\n\n" +
+                "This will normalize all swing data so the club position\n" +
+                "at address is always 0,0,0 with 0° face angle.\n\n" +
+                "Recommended: Yes")
+            
+            if response:
+                self.capture_address_reference()
+            else:
+                # Skip address capture
+                if self.on_complete:
+                    self.on_complete()
+                self.close()
         else:
             messagebox.showerror("Error", 
                 "Calibration failed. Please try again.")
@@ -537,11 +546,17 @@ Click "Collect Data" when ready. Hold steady for 2 seconds.
         # Switch to quaternion mode
         if hasattr(self.capture, 'disable_calibration_mode'):
             self.capture.disable_calibration_mode()
+            print("[ADDRESS] Disabled calibration mode, switching to quaternion mode")
+            # Clear any old raw data
+            if hasattr(self.capture, 'latest_raw_data'):
+                self.capture.latest_raw_data = None
         
         # Reset collection state
         self.address_samples = []
         self.sample_count = 0
         self.target_samples = 50
+        self.address_attempt_count = 0
+        self.address_max_attempts = 500  # 500 * 40ms = 20 seconds timeout
         
         # Update UI
         self.update_instructions("""FINAL STEP: Address Position Reference
@@ -566,19 +581,43 @@ Click "Capture Address" when ready.""")
         self.start_btn.config(state="disabled")
         self.sample_count = 0
         self.address_samples = []
+        self.address_attempt_count = 0
         self.update_instructions("Capturing address position... Hold steady!")
-        self.dialog.after(100, self.collect_address_samples)
+        print("[ADDRESS] Starting address capture, waiting 500ms for mode switch...")
+        # Wait longer for device to switch from calibration to quaternion mode
+        self.dialog.after(500, self.collect_address_samples)
     
     def collect_address_samples(self):
         """Collect quaternion samples at address position"""
+        # Check for timeout
+        self.address_attempt_count += 1
+        if self.address_attempt_count >= self.address_max_attempts:
+            messagebox.showerror("Timeout", 
+                f"Address capture timed out after {self.address_max_attempts * 40 / 1000:.1f} seconds.\n"
+                f"Only collected {self.sample_count}/{self.target_samples} samples.\n\n"
+                "Make sure the sensor is connected and sending quaternion data.\n"
+                "Try disconnecting and reconnecting the device.")
+            self.close()
+            return
+        
         try:
             # Get current quaternion data
             if hasattr(self.capture, 'get_latest_raw_data'):
                 data = self.capture.get_latest_raw_data()
                 
+                # Debug first 10 attempts
+                if self.address_attempt_count <= 10:
+                    print(f"[ADDRESS] Attempt {self.address_attempt_count}: data={type(data)}, is_none={data is None}")
+                    if data:
+                        print(f"[ADDRESS] Data keys: {list(data.keys())}")
+                        print(f"[ADDRESS] Data type field: {data.get('type', 'NO_TYPE')}")
+                
                 if data and 'q0' in data:
                     self.address_samples.append([data['q0'], data['q1'], data['q2'], data['q3']])
                     self.sample_count += 1
+                    
+                    if self.sample_count <= 5:
+                        print(f"[ADDRESS] ✓ Sample #{self.sample_count} collected! Quaternion: [{data['q0']:.3f}, {data['q1']:.3f}, {data['q2']:.3f}, {data['q3']:.3f}]")
                     
                     # Update progress
                     progress = int((self.sample_count / self.target_samples) * 100)
@@ -586,11 +625,17 @@ Click "Capture Address" when ready.""")
                     self.update_instructions(
                         f"Capturing address position... Hold steady!\n\n" +
                         f"Samples: {self.sample_count}/{self.target_samples}")
+                elif data and self.address_attempt_count == 20:
+                    # After 20 attempts, show what we're getting
+                    print(f"[ADDRESS] ✗ Still no quaternion data after 20 attempts. Last data: {data}")
         except Exception as e:
-            print(f"Error collecting address sample: {e}")
+            print(f"[ADDRESS] Error collecting address sample: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Check if done
         if self.sample_count >= self.target_samples:
+            print(f"[ADDRESS] ✓ Target reached! Collected {self.sample_count} samples")
             self.finish_address_capture()
         else:
             self.dialog.after(40, self.collect_address_samples)
@@ -618,20 +663,17 @@ Click "Capture Address" when ready.""")
             # Normalize
             address_quat_avg = address_quat_avg / np.linalg.norm(address_quat_avg)
             
-            # Calculate position using same method as visualizer
+            # SIMPLIFIED APPROACH: Set address position to origin [0, 0, 0]
+            # All swing measurements will be relative to this reference point
+            # This avoids complex coordinate transformations that can introduce errors
+            address_position = np.array([0.0, 0.0, 0.0])
+            
+            print(f"[ADDRESS] Using simplified address position: [0, 0, 0]")
+            print(f"[ADDRESS] All swing measurements will be relative to address")
+            
+            # Calculate face angle for reference
             quat_scipy = np.array([address_quat_avg[1], address_quat_avg[2], address_quat_avg[3], address_quat_avg[0]])
             rot = R.from_quat(quat_scipy)
-            
-            # Shaft vector in sensor frame
-            shaft_sensor = np.array([-1.0, 0.0, 0.0])
-            shaft_rotated = rot.apply(shaft_sensor)
-            
-            # Map to golf coordinates
-            golf_shaft = np.array([shaft_rotated[1], shaft_rotated[2], -shaft_rotated[0]])
-            
-            # Position = shaft direction * club length
-            club_length_m = 1.168  # 46" driver
-            address_position = golf_shaft * club_length_m
             
             # Calculate face angle
             face_normal_sensor = np.array([0.0, 0.0, 1.0])
@@ -657,9 +699,9 @@ Click "Capture Address" when ready.""")
             if success:
                 messagebox.showinfo("Success",
                     f"Address reference captured!\n\n" +
-                    f"Position: X={address_position[0]:.3f}, Y={address_position[1]:.3f}, Z={address_position[2]:.3f} m\n" +
+                    f"Position set to: [0, 0, 0] (origin)\n" +
                     f"Face angle: {address_face_angle:.2f}°\n\n" +
-                    f"All swing data will now be normalized to this reference.")
+                    f"All swing measurements will be relative to this address position.")
                 if self.on_complete:
                     self.on_complete()
                 self.close()

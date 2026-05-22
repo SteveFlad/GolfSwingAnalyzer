@@ -243,7 +243,7 @@ class SerialCapture:
                 q2 = float(match.group(3))
                 q3 = float(match.group(4))
                 
-                return {
+                data = {
                     'q0': q0,
                     'q1': q1,
                     'q2': q2,
@@ -252,6 +252,11 @@ class SerialCapture:
                     'raw': line,
                     'type': 'quaternion'
                 }
+                
+                # Store quaternion data too so get_latest_raw_data() returns current data
+                self.latest_raw_data = data
+                
+                return data
             except ValueError:
                 return None
         return None

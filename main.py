@@ -366,6 +366,7 @@ class GolfSwingAnalyzer:
         calib_frame.pack(fill="x", padx=10, pady=5)
         
         tk.Button(calib_frame, text="Calibrate Sensor", command=self.start_calibration_wizard, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
+        tk.Button(calib_frame, text="Set Address Reference", command=self.capture_address_reference_only, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
         tk.Button(calib_frame, text="Reset Calibration", command=self.reset_calibration, font=self.button_font, padx=12, pady=6).pack(side="left", padx=5)
         
         self.calib_status_label = ttk.Label(calib_frame, text=f"Status: {self.calibration.get_calibration_status()}")
@@ -1243,6 +1244,22 @@ class GolfSwingAnalyzer:
                                   on_complete=self.update_calibration_status)
         
         # Note: No need for self.root.after() - callback handles it
+    
+    def capture_address_reference_only(self):
+        """Capture only the address reference without full calibration"""
+        if not self.is_connected():
+            messagebox.showerror("Error", "Please connect to a device first")
+            return
+        
+        # Get the current capture device
+        capture_device = self.serial_capture if self.connection_type == "serial" else self.bluetooth_capture
+        
+        # Create a simplified wizard that goes straight to address capture
+        wizard = CalibrationWizard(self.root, capture_device, self.calibration,
+                                  on_complete=self.update_calibration_status)
+        
+        # Immediately trigger address capture (skip intro)
+        wizard.dialog.after(100, wizard.capture_address_reference)
     
     def reset_calibration(self):
         """Reset calibration to default"""
