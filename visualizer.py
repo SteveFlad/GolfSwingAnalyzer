@@ -312,18 +312,24 @@ class SwingVisualizer:
         
         print(f"Raw address face angle: {self.address_face_angle_raw:.2f}°")
         
-        # Normalize positions: subtract address position so address becomes origin (0,0,0)
+        # CRITICAL: Normalize positions so ball (address) is at origin (0,0,0)
+        # IMU measures orientation only, not absolute position. The calculated "positions"
+        # assume a fixed grip at origin, which is incorrect (grip moves during swing).
+        # By normalizing to address, we define the BALL location as (0,0,0) and measure
+        # how far the club head is from the ball at each point. Impact should be near (0,0,0).
         self.positions = self.positions - self.address_position_raw
         
         # Normalize face angles: subtract address face angle so address becomes 0°
         self.face_angles = self.face_angles - self.address_face_angle_raw
         
-        print(f"\n=== After Address Normalization ===")
+        print(f"\n=== Ball-Relative Positions (Ball at Origin) ===")
+        print(f"NOTE: Positions show distance from ball, NOT absolute coordinates")
+        print(f"      IMU measures orientation only; positions are synthetic approximations")
         if hasattr(self, 'address_idx'):
-            print(f"Address position now at: X={self.positions[self.address_idx][0]:.3f}, Y={self.positions[self.address_idx][1]:.3f}, Z={self.positions[self.address_idx][2]:.3f} m")
-            print(f"Address face angle now at: {self.face_angles[self.address_idx]:.2f}°")
+            print(f"Address (ball) at: X={self.positions[self.address_idx][0]:.3f}, Y={self.positions[self.address_idx][1]:.3f}, Z={self.positions[self.address_idx][2]:.3f} m (should be ~0,0,0)")
+            print(f"Address face angle: {self.face_angles[self.address_idx]:.2f}° (normalized to 0°)")
         else:
-            print(f"First sample position: X={self.positions[0][0]:.3f}, Y={self.positions[0][1]:.3f}, Z={self.positions[0][2]:.3f} m")
+            print(f"First sample offset from ball: X={self.positions[0][0]:.3f}, Y={self.positions[0][1]:.3f}, Z={self.positions[0][2]:.3f} m")
             print(f"First sample face angle: {self.face_angles[0]:.2f}°")
         
         # Apply cubic spline interpolation to increase point density and reduce max jump
@@ -417,6 +423,32 @@ class SwingVisualizer:
                 else:
                     print(f"⚠ Max speed too low for impact detection: {max_speed_mph:.1f} mph")
         
+        # Detect top of swing (transition point where speed is near zero between backswing and downswing)
+        self.top_idx = None
+        if self.impact_idx is not None and hasattr(self, 'address_idx'):
+            # Search between address and impact for the point where speed is minimal
+            search_start = self.address_idx + 10  # Skip first 10 samples to avoid address noise
+            search_end = self.impact_idx - 10  # Stop before impact
+            
+            if search_end > search_start:
+                velocities_mph_range = self.velocities[search_start:search_end] * self.rad_to_mph
+                min_speed_rel_idx = np.argmin(velocities_mph_range)
+                self.top_idx = search_start + min_speed_rel_idx
+                top_speed_mph = velocities_mph_range[min_speed_rel_idx]
+                
+                print(f"✓ Top of swing detected at sample #{self.top_idx} (speed: {top_speed_mph:.1f} mph)")
+                
+                # Calculate swing timing
+                original_backswing = (self.top_idx - self.address_idx) / self.interp_factor
+                original_downswing = (self.impact_idx - self.top_idx) / self.interp_factor
+                backswing_sec = original_backswing * 0.01
+                downswing_sec = original_downswing * 0.01
+                tempo_ratio = backswing_sec / downswing_sec if downswing_sec > 0 else 0
+                
+                print(f"Backswing: {original_backswing:.0f} samples ({backswing_sec:.2f}s)")
+                print(f"Downswing: {original_downswing:.0f} samples ({downswing_sec:.2f}s)")
+                print(f"Tempo Ratio: {tempo_ratio:.2f}:1 (backswing:downswing)")
+        
         # Trajectory is already normalized: address at 0,0,0 with face angle at 0°
         # Just verify bounds and optionally scale for better visualization
         if len(self.positions) > 0:
@@ -449,17 +481,20 @@ class SwingVisualizer:
             else:
                 ball_pos_str = "N/A"
             
-            print(f"\n=== Normalized Trajectory Bounds (feet, relative to address) ===")
+            print(f"\n=== Ball-Relative Trajectory Bounds (feet, distance from ball) ===")
             print(f"X (Target Line): {x_min_ft:.2f} to {x_max_ft:.2f} ft")
             print(f"Y (In/Out):      {y_min_ft:.2f} to {y_max_ft:.2f} ft")
             print(f"Z (Height):      {z_min_ft:.2f} to {z_max_ft:.2f} ft")
-            print(f"Impact position: {ball_pos_str}")
+            print(f"Impact offset from ball: {ball_pos_str}")
+            if hasattr(self, 'address_idx'):
+                addr_ft = self.positions[self.address_idx] * self.m_to_ft
+                print(f"Address (ball) position: X={addr_ft[0]:.2f} ft, Y={addr_ft[1]:.2f} ft, Z={addr_ft[2]:.2f} ft (should be ~0)")
         
         # Print diagnostic information
         print(f"\n=== Swing Data Analysis (Natural Golf Coordinates) ===")
         print(f"Total samples: {len(self.data)}")
         print(f"Position points: {len(self.positions)}")
-        print(f"Position calculation: Relative to address (0,0,0)")
+        print(f"Position calculation: Distance from ball (ball = origin at 0,0,0)")
         
         # Detailed speed diagnostics
         max_speed_raw = np.max(raw_speeds)
@@ -524,9 +559,9 @@ class SwingVisualizer:
         return np.argmin(velocities_mph[:search_end])
     
     def show(self):
-        """Display the 3D visualization"""
+        """Display reliable IMU metrics visualization"""
         # Create maximized figure with filter info in title
-        filter_info = f"Filters: {self.filter_type.replace('_', ' ').title()} | Window: {self.smoothing_window} | Deadband: {self.deadband_deg:.2f}° | Noise Floor: {self.noise_floor_percentile:.0f}%"
+        filter_info = f"IMU Metrics (Reliable) | Filters: {self.filter_type.replace('_', ' ').title()} | Window: {self.smoothing_window}"
         
         # Extract just the filename (not full path) if available
         import os
@@ -541,41 +576,36 @@ class SwingVisualizer:
         fig.canvas.manager.set_window_title(display_name)
         fig.suptitle(filter_info, fontsize=10, y=0.995)
         
-        # Create custom grid: 3D plot takes left 2/3, other plots on right 1/3
+        # Create custom grid: speed and face angle get more space
         # Leave space at bottom for slider controls and scale
-        gs = GridSpec(4, 2, figure=fig, width_ratios=[2, 1], height_ratios=[1, 1, 1, 1],
-                     hspace=0.4, wspace=0.3, top=0.96, bottom=0.14, left=0.05, right=0.98)
+        gs = GridSpec(4, 2, figure=fig, width_ratios=[1, 1], height_ratios=[1.8, 1.8, 1.4, 1.5],
+                     hspace=1.05, wspace=0.3, top=0.96, bottom=0.14, left=0.05, right=0.98)
         
-        # 3D trajectory plot - spans all 4 rows on the left
-        ax1 = fig.add_subplot(gs[:, 0], projection='3d')
+        # Main metrics - large panels
+        ax_speed = fig.add_subplot(gs[0, :])  # Speed spans full width
+        ax_face = fig.add_subplot(gs[1, :])   # Face angle spans full width
         
-        # Speed over time - top right
-        ax2 = fig.add_subplot(gs[0, 1])
+        # Secondary analysis
+        ax_orientation = fig.add_subplot(gs[2, 0])  # Orientation consistency
+        ax_tempo = fig.add_subplot(gs[2, 1])        # Swing tempo
         
-        # Club face angle - second from top right
-        ax_face = fig.add_subplot(gs[1, 1])
-        
-        # Top view - third from top right
-        ax3 = fig.add_subplot(gs[2, 1])
-        
-        # Side view - bottom right
-        ax4 = fig.add_subplot(gs[3, 1])
+        # Summary metrics panel - larger to show all content
+        ax_summary = fig.add_subplot(gs[3, :])      # Text summary spans width with more space
+        ax_summary.axis('off')
         
         # Store axes for update function
         self.fig = fig
-        self.axes = {'3d': ax1, 'speed': ax2, 'face': ax_face, 'top': ax3, 'side': ax4}
+        self.axes = {
+            'speed': ax_speed, 
+            'face': ax_face, 
+            'orientation': ax_orientation,
+            'tempo': ax_tempo,
+            'summary': ax_summary
+        }
         
         # Create slider axes at bottom with proper spacing
-        ax_slider_start = fig.add_axes([0.15, 0.09, 0.65, 0.015])
-        ax_slider_end = fig.add_axes([0.15, 0.03, 0.65, 0.015])
-        
-        # Add coordinate system legend above sliders
-        ax_coords = fig.add_axes([0.15, 0.115, 0.30, 0.02])
-        ax_coords.axis('off')
-        coord_text = 'Golf Coordinates: X = Target Line (±left/right) | Y = In/Out (ball/away) | Z = Height (ground/up)'
-        ax_coords.text(0, 0.5, coord_text, fontsize=9, fontweight='bold', 
-                      ha='left', va='center', color='darkblue',
-                      bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
+        ax_slider_start = fig.add_axes([0.15, 0.06, 0.65, 0.015])
+        ax_slider_end = fig.add_axes([0.15, 0.02, 0.65, 0.015])
         
         # Create sliders
         total_samples = len(self.positions)
@@ -583,32 +613,6 @@ class SwingVisualizer:
                                    valinit=0, valstep=1, color='lightblue')
         self.slider_end = Slider(ax_slider_end, 'End Sample', 0, total_samples-1, 
                                  valinit=total_samples-1, valstep=1, color='lightblue')
-        
-        # Add scale indicator between sliders
-        ax_scale = fig.add_axes([0.15, 0.055, 0.65, 0.015])
-        ax_scale.set_xlim(0, total_samples-1)
-        ax_scale.set_ylim(0, 1)
-        ax_scale.axis('off')
-        
-        # Draw scale line
-        ax_scale.plot([0, total_samples-1], [0.5, 0.5], 'k-', linewidth=2, alpha=0.3)
-        
-        # Add tick marks every 10 samples
-        marker_interval = 10
-        for i in range(0, total_samples, marker_interval):
-            ax_scale.plot([i, i], [0.3, 0.7], 'k-', linewidth=1, alpha=0.5)
-            if i % 50 == 0:  # Label every 50 samples
-                ax_scale.text(i, 0.1, str(i), ha='center', va='top', fontsize=7, alpha=0.7)
-        
-        # Add final marker
-        if (total_samples-1) % marker_interval != 0:
-            ax_scale.plot([total_samples-1, total_samples-1], [0.3, 0.7], 'k-', linewidth=1, alpha=0.5)
-            ax_scale.text(total_samples-1, 0.1, str(total_samples-1), ha='center', va='top', fontsize=7, alpha=0.7)
-        
-        # Highlight current range
-        self.range_highlight = ax_scale.fill_between([0, total_samples-1], 0.3, 0.7, 
-                                                      color='lightblue', alpha=0.5, zorder=3)
-        self.ax_scale = ax_scale
         
         # Update function for sliders
         def update(val):
@@ -619,25 +623,17 @@ class SwingVisualizer:
             if start >= end:
                 return
             
-            # Clear all axes
+            # Clear all plot axes (not summary text axis)
             for ax_key, ax in self.axes.items():
-                ax.clear()
-                if ax_key == '3d':
-                    # Re-setup 3D axis after clear
-                    ax.remove()
-                    self.axes['3d'] = fig.add_subplot(gs[:, 0], projection='3d')
+                if ax_key != 'summary':
+                    ax.clear()
             
             # Redraw with filtered range
-            self.plot_trajectory(self.axes['3d'], start, end)
-            self.plot_speed(self.axes['speed'], start, end)
-            self.plot_face_angle(self.axes['face'], start, end)
-            self.plot_top_view(self.axes['top'], start, end)
-            self.plot_side_view(self.axes['side'], start, end)
-            
-            # Update range highlight on scale
-            self.range_highlight.remove()
-            self.range_highlight = self.ax_scale.fill_between([start, end], 0.3, 0.7, 
-                                                               color='lightgreen', alpha=0.6, zorder=3)
+            self.plot_speed_detailed(self.axes['speed'], start, end)
+            self.plot_face_angle_detailed(self.axes['face'], start, end)
+            self.plot_orientation_consistency(self.axes['orientation'], start, end)
+            self.plot_swing_tempo(self.axes['tempo'], start, end)
+            self.plot_summary_metrics(self.axes['summary'], start, end)
             
             fig.canvas.draw_idle()
         
@@ -645,9 +641,9 @@ class SwingVisualizer:
         self.slider_end.on_changed(update)
         
         # Add control buttons
-        # Reset button (aligned with end slider)
-        ax_btn_reset = fig.add_axes([0.87, 0.03, 0.08, 0.04])
-        btn_reset = Button(ax_btn_reset, 'Reset', color='lightgray', hovercolor='gray')
+        # Reset button
+        ax_btn_reset = fig.add_axes([0.87, 0.02, 0.08, 0.03])
+        btn_reset = Button(ax_btn_reset, 'Reset Range', color='lightgray', hovercolor='gray')
         
         def reset(event):
             self.slider_start.set_val(0)
@@ -655,10 +651,10 @@ class SwingVisualizer:
         
         btn_reset.on_clicked(reset)
         
-        # Focus Impact button (if impact detected, aligned with start slider)
+        # Focus Impact button (if impact detected)
         if self.impact_idx is not None:
-            ax_btn_impact = fig.add_axes([0.87, 0.09, 0.08, 0.04])
-            btn_impact = Button(ax_btn_impact, 'Impact', color='gold', hovercolor='orange')
+            ax_btn_impact = fig.add_axes([0.87, 0.06, 0.08, 0.03])
+            btn_impact = Button(ax_btn_impact, 'Focus Impact', color='gold', hovercolor='orange')
             
             def focus_impact(event):
                 # Show ±50 samples around impact
@@ -669,70 +665,12 @@ class SwingVisualizer:
             
             btn_impact.on_clicked(focus_impact)
         
-        # Add 3D View Preset Buttons (positioned in the right column)
-        btn_width = 0.10
-        btn_height = 0.028
-        btn_x = 0.605  # Left edge of right column
-        btn_y_start = 0.26  # Positioned between Face Angle and Top View graphs
-        btn_spacing = 0.038
-        
-        # Add label for view buttons
-        ax_view_label = fig.add_axes([btn_x, btn_y_start + 0.04, btn_width, 0.02])
-        ax_view_label.axis('off')
-        ax_view_label.text(0.5, 0.5, '3D View Angles:', ha='center', va='center', 
-                          fontsize=9, fontweight='bold')
-        
-        # Side View button (top position)
-        ax_btn_face = fig.add_axes([btn_x, btn_y_start, btn_width, btn_height])
-        btn_face = Button(ax_btn_face, 'Side View', color='lightgreen', hovercolor='lightcoral')
-        
-        def view_face(event):
-            # View from behind golfer looking toward ball with floor plane visible
-            # elev=0 horizontal view at eye level
-            # azim=0 looks down the Y-axis (in/out), target line (X) at bottom
-            self.axes['3d'].view_init(elev=0, azim=0, roll=0)
-            fig.canvas.draw_idle()
-        
-        btn_face.on_clicked(view_face)
-        
-        # Down-the-line button (second position)
-        ax_btn_dtl = fig.add_axes([btn_x, btn_y_start - btn_spacing, btn_width, btn_height])
-        btn_dtl = Button(ax_btn_dtl, 'Down-Line', color='lightblue', hovercolor='skyblue')
-        
-        def view_dtl(event):
-            # Opposite direction from Side View
-            self.axes['3d'].view_init(elev=0, azim=180, roll=0)
-            fig.canvas.draw_idle()
-        
-        btn_dtl.on_clicked(view_dtl)
-        
-        # Top-down button
-        ax_btn_top = fig.add_axes([btn_x, btn_y_start - 2*btn_spacing, btn_width, btn_height])
-        btn_top = Button(ax_btn_top, 'Top-Down', color='lightyellow', hovercolor='gold')
-        
-        def view_top(event):
-            self.axes['3d'].view_init(elev=90, azim=0, roll=0)
-            fig.canvas.draw_idle()
-        
-        btn_top.on_clicked(view_top)
-        
-        # Normal Stance button (fourth position)
-        ax_btn_side = fig.add_axes([btn_x, btn_y_start - 3*btn_spacing, btn_width, btn_height])
-        btn_side = Button(ax_btn_side, 'Normal Stance', color='lightcoral', hovercolor='salmon')
-        
-        def view_side(event):
-            # Face-on view from the side, looking perpendicular to target line
-            self.axes['3d'].view_init(elev=0, azim=90, roll=0)
-            fig.canvas.draw_idle()
-        
-        btn_side.on_clicked(view_side)
-        
-        # Plot all views with full range initially
-        self.plot_trajectory(ax1, 0, total_samples-1)
-        self.plot_speed(ax2, 0, total_samples-1)
-        self.plot_face_angle(ax_face, 0, total_samples-1)
-        self.plot_top_view(ax3, 0, total_samples-1)
-        self.plot_side_view(ax4, 0, total_samples-1)
+        # Plot all metrics with full range initially
+        self.plot_speed_detailed(self.axes['speed'], 0, total_samples-1)
+        self.plot_face_angle_detailed(self.axes['face'], 0, total_samples-1)
+        self.plot_orientation_consistency(self.axes['orientation'], 0, total_samples-1)
+        self.plot_swing_tempo(self.axes['tempo'], 0, total_samples-1)
+        self.plot_summary_metrics(self.axes['summary'], 0, total_samples-1)
         
         plt.tight_layout()
         
@@ -835,7 +773,11 @@ class SwingVisualizer:
         ax.scatter(*end_pos_ft, color='red', s=100, marker='X', 
                   label=f'End (#{end_idx})', zorder=10)
         
-        # Mark impact point and ball if detected and within visible range
+        # Draw ball at origin (0,0,0) - this is the address/target position
+        ax.scatter(0, 0, 0, color='white', s=200, marker='o', 
+                  edgecolors='black', linewidths=3, label='Ball (0,0,0)', zorder=20)
+        
+        # Mark impact point if detected and within visible range
         impact_data = None  # Store impact data for diagnostic box
         if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
             relative_impact_idx = self.impact_idx - start_idx
@@ -850,16 +792,15 @@ class SwingVisualizer:
                 'angle': impact_face_angle
             }
             
-            # Ball marker at impact position
-            ax.scatter(impact_pos[0], impact_pos[1], impact_pos[2], 
-                      color='white', s=150, marker='o', 
-                      edgecolors='black', linewidths=3, label='Ball', zorder=12)
-            
-            # Impact marker (star) at same position
+            # Impact marker (star) at club head position during impact
             ax.scatter(impact_pos[0], impact_pos[1], impact_pos[2], 
                       color='gold', s=400, marker='*', 
                       edgecolors='orange', linewidths=2,
                       label=f'Impact (#{self.impact_idx})', zorder=15)
+            
+            # Draw line from ball to impact position to show accuracy
+            ax.plot([0, impact_pos[0]], [0, impact_pos[1]], [0, impact_pos[2]],
+                   'r--', linewidth=2, alpha=0.7, label='Ball to Impact')
         
         # Calculate trajectory bounds for arrow scaling (in feet)
         x_range = np.ptp(positions_ft[:, 0]) if len(positions_ft) > 1 else 1.0
@@ -935,7 +876,7 @@ class SwingVisualizer:
                          fontsize=11, fontweight='bold', labelpad=10)
             ax.set_zlabel('HEIGHT (Z-axis, feet)\n← Ground | Up →', 
                          fontsize=11, fontweight='bold', labelpad=10)
-            ax.set_title('3D Club Head Trajectory\n(Golf Coordinates: Target Line, In/Out, Height)', 
+            ax.set_title('3D Club Head Path - Distance from Ball\n(Ball at origin 0,0,0 | Impact should return near origin)', 
                         fontsize=12, fontweight='bold', pad=15)
         else:
             ax.set_xlabel('Shaft (ft)')
@@ -965,10 +906,10 @@ class SwingVisualizer:
             address_pos_ft = positions_ft[0]  # Fallback
         
         # Build diagnostic text with address and optional impact data
-        diag_text = (f'📍 ADDRESS POSITION:\n'
-                    f'  X: {address_pos_ft[0]:+.2f} ft\n'
-                    f'  Y: {address_pos_ft[1]:+.2f} ft\n'
-                    f'  Z: {address_pos_ft[2]:+.2f} ft\n'
+        diag_text = (f'🏌 BALL POSITION (Address):\n'
+                    f'  X: {address_pos_ft[0]:+.2f} ft (should be ~0)\n'
+                    f'  Y: {address_pos_ft[1]:+.2f} ft (should be ~0)\n'
+                    f'  Z: {address_pos_ft[2]:+.2f} ft (should be ~0)\n'
                     f'  Face: {self.face_angles[address_idx]:+.1f}°\n'
                     f'\nTrajectory Ranges:\n'
                     f'  Target Line (X): {x_range_ft:.2f} ft\n'
@@ -979,11 +920,14 @@ class SwingVisualizer:
         
         # Add impact data if available
         if impact_data is not None:
-            impact_text = (f'\n\n★ IMPACT DATA ★\n'
-                          f'Position:\n'
+            # Calculate distance from ball (origin)
+            impact_dist = np.linalg.norm(impact_data["pos"])
+            impact_text = (f'\n\n⚡ IMPACT DATA ⚡\n'
+                          f'Distance from Ball:\n'
                           f'  X: {impact_data["pos"][0]:+.2f} ft\n'
                           f'  Y: {impact_data["pos"][1]:+.2f} ft\n'
                           f'  Z: {impact_data["pos"][2]:+.2f} ft\n'
+                          f'  Total: {impact_dist:.2f} ft\n'
                           f'Speed: {impact_data["speed"]:.1f} mph\n'
                           f'Face: {impact_data["angle"]:+.1f}°')
             diag_text += impact_text
@@ -1254,6 +1198,292 @@ class SwingVisualizer:
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=7, framealpha=0.9)
+    
+    def plot_speed_detailed(self, ax, start_idx=None, end_idx=None):
+        """Plot detailed speed analysis with key metrics highlighted"""
+        if start_idx is None:
+            start_idx = 0
+        if end_idx is None:
+            end_idx = len(self.velocities) - 1
+        
+        velocities = self.velocities[start_idx:end_idx+1]
+        velocities_mph = velocities * self.rad_to_mph
+        
+        # Create x-axis (sample numbers)
+        samples = np.arange(start_idx, end_idx+1)
+        
+        # Plot speed curve
+        ax.plot(samples, velocities_mph, 'b-', linewidth=2, label='Club Head Speed')
+        ax.fill_between(samples, 0, velocities_mph, alpha=0.3)
+        
+        # Mark key points
+        if hasattr(self, 'address_idx') and start_idx <= self.address_idx <= end_idx:
+            ax.axvline(x=self.address_idx, color='green', linestyle='--', linewidth=1, alpha=0.7, label='Address')
+        
+        if hasattr(self, 'top_idx') and self.top_idx is not None and start_idx <= self.top_idx <= end_idx:
+            top_speed = velocities_mph[self.top_idx - start_idx]
+            ax.axvline(x=self.top_idx, color='blue', linestyle='--', linewidth=2, label=f'Top: {top_speed:.1f} mph')
+            ax.scatter([self.top_idx], [top_speed], color='blue', s=150, marker='o', edgecolors='darkblue', linewidths=2, zorder=10)
+        
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            impact_speed = velocities_mph[self.impact_idx - start_idx]
+            ax.axvline(x=self.impact_idx, color='gold', linestyle='--', linewidth=2, label=f'Impact: {impact_speed:.1f} mph')
+            ax.scatter([self.impact_idx], [impact_speed], color='gold', s=200, marker='*', edgecolors='orange', linewidths=2, zorder=10)
+        
+        # Add threshold lines
+        max_speed = np.max(velocities_mph)
+        ax.axhline(y=max_speed, color='red', linestyle=':', alpha=0.5, label=f'Peak: {max_speed:.1f} mph')
+        ax.axhline(y=max_speed * 0.5, color='orange', linestyle=':', alpha=0.3, label=f'50% Peak')
+        
+        ax.set_xlabel('Sample Number', fontweight='bold')
+        ax.set_ylabel('Speed (mph)', fontweight='bold')
+        ax.set_title('⚡ Club Head Speed Analysis (IMU-Accurate)', fontsize=12, fontweight='bold', loc='left')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left', fontsize=9)
+        
+        # Add text box with statistics
+        avg_speed = np.mean(velocities_mph)
+        stats_text = f'Max: {max_speed:.1f} mph\nAvg: {avg_speed:.1f} mph\nSamples: {len(velocities)}'
+        ax.text(0.98, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    
+    def plot_face_angle_detailed(self, ax, start_idx=None, end_idx=None):
+        """Plot detailed face angle analysis"""
+        if start_idx is None:
+            start_idx = 0
+        if end_idx is None:
+            end_idx = len(self.face_angles) - 1
+        
+        face_angles = self.face_angles[start_idx:end_idx+1]
+        samples = np.arange(start_idx, end_idx+1)
+        
+        # Plot face angle curve
+        ax.plot(samples, face_angles, 'g-', linewidth=2, label='Face Angle')
+        
+        # Color zones: closed (positive), square (near 0), open (negative)
+        ax.fill_between(samples, 0, face_angles, where=(face_angles >= 0), 
+                        color='blue', alpha=0.2, label='Closed (left)')
+        ax.fill_between(samples, 0, face_angles, where=(face_angles < 0), 
+                        color='red', alpha=0.2, label='Open (right)')
+        
+        # Mark square line
+        ax.axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5, label='Square to Target')
+        
+        # Mark impact
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            impact_angle = face_angles[self.impact_idx - start_idx]
+            ax.axvline(x=self.impact_idx, color='gold', linestyle='--', linewidth=2, label=f'Impact: {impact_angle:+.1f}°')
+            ax.scatter([self.impact_idx], [impact_angle], color='gold', s=200, marker='*', edgecolors='orange', linewidths=2, zorder=10)
+        
+        if hasattr(self, 'address_idx') and start_idx <= self.address_idx <= end_idx:
+            ax.axvline(x=self.address_idx, color='green', linestyle='--', linewidth=1, alpha=0.7, label='Address')
+        
+        ax.set_xlabel('Sample Number', fontweight='bold')
+        ax.set_ylabel('Face Angle (degrees)', fontweight='bold')
+        ax.set_title('🎯 Club Face Angle vs Target Line (IMU-Accurate)', fontsize=12, fontweight='bold', loc='left')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='center left', fontsize=9)
+        
+        # Add stats
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            impact_angle = face_angles[self.impact_idx - start_idx]
+            stats_text = f'Impact: {impact_angle:+.1f}°\nRange: {np.min(face_angles):.1f}° to {np.max(face_angles):.1f}°'
+        else:
+            stats_text = f'Range: {np.min(face_angles):.1f}° to {np.max(face_angles):.1f}°'
+        
+        ax.text(0.98, 0.02, stats_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='bottom', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    
+    def plot_orientation_consistency(self, ax, start_idx=None, end_idx=None):
+        """Plot orientation changes to show swing path consistency"""
+        if start_idx is None:
+            start_idx = 0
+        if end_idx is None:
+            end_idx = len(self.orientations) - 1
+        
+        # Use interpolated orientations (not raw data)
+        # Get address orientation from stored orientations array
+        address_quat = _normalize_quaternion_wxyz(self.orientations[self.address_idx])
+        
+        orientation_diffs = []
+        for i in range(start_idx, end_idx+1):
+            quat = _normalize_quaternion_wxyz(self.orientations[i])
+            diff_quat = _quat_multiply_wxyz(quat, _quat_conjugate_wxyz(address_quat))
+            diff_quat = _normalize_quaternion_wxyz(diff_quat)
+            if diff_quat[0] < 0:
+                diff_quat = -diff_quat
+            angle = 2.0 * np.arctan2(np.linalg.norm(diff_quat[1:]), diff_quat[0])
+            orientation_diffs.append(np.degrees(angle))
+        
+        samples = np.arange(start_idx, end_idx+1)
+        
+        # Plot orientation difference
+        ax.plot(samples, orientation_diffs, 'purple', linewidth=2, label='Rotation from Address')
+        ax.fill_between(samples, 0, orientation_diffs, alpha=0.3, color='purple')
+        
+        # Mark impact
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            impact_diff = orientation_diffs[self.impact_idx - start_idx]
+            ax.axvline(x=self.impact_idx, color='gold', linestyle='--', linewidth=2)
+            ax.scatter([self.impact_idx], [impact_diff], color='gold', s=150, marker='*', zorder=10)
+            
+            # Add interpretation
+            if impact_diff < 15:
+                status = "✅ Excellent Return"
+                color = 'green'
+            elif impact_diff < 30:
+                status = "✓ Good Return"
+                color = 'orange'
+            else:
+                status = "⚠ Large Deviation"
+                color = 'red'
+            
+            ax.text(0.02, 0.98, f'Impact Rotation: {impact_diff:.1f}°\n{status}',
+                   transform=ax.transAxes, fontsize=10, fontweight='bold',
+                   verticalalignment='top', color=color,
+                   bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
+        
+        ax.set_xlabel('Sample Number', fontweight='bold')
+        ax.set_ylabel('Rotation Angle (degrees)', fontweight='bold')
+        ax.set_title('🔄 Club Orientation Return Accuracy', fontsize=11, fontweight='bold', loc='left')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=9)
+    
+    def plot_swing_tempo(self, ax, start_idx=None, end_idx=None):
+        """Plot swing tempo and timing analysis"""
+        if start_idx is None:
+            start_idx = 0
+        if end_idx is None:
+            end_idx = len(self.velocities) - 1
+        
+        velocities_mph = self.velocities[start_idx:end_idx+1] * self.rad_to_mph
+        samples = np.arange(start_idx, end_idx+1)
+        
+        # Calculate acceleration (rate of speed change)
+        acceleration = np.gradient(velocities_mph)
+        
+        # Plot acceleration
+        ax.plot(samples, acceleration, 'r-', linewidth=2, label='Acceleration')
+        ax.fill_between(samples, 0, acceleration, where=(acceleration >= 0), 
+                        color='green', alpha=0.3, label='Accelerating')
+        ax.fill_between(samples, 0, acceleration, where=(acceleration < 0), 
+                        color='red', alpha=0.3, label='Decelerating')
+        
+        ax.axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        
+        # Mark key swing positions
+        if hasattr(self, 'address_idx') and start_idx <= self.address_idx <= end_idx:
+            ax.axvline(x=self.address_idx, color='green', linestyle='--', linewidth=1, alpha=0.7, label='Address')
+        
+        if hasattr(self, 'top_idx') and self.top_idx is not None and start_idx <= self.top_idx <= end_idx:
+            ax.axvline(x=self.top_idx, color='blue', linestyle='--', linewidth=2, label='Top')
+        
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            ax.axvline(x=self.impact_idx, color='gold', linestyle='--', linewidth=2, label='Impact')
+        
+        ax.set_xlabel('Sample Number', fontweight='bold')
+        ax.set_ylabel('Acceleration (mph/sample)', fontweight='bold')
+        ax.set_title('⏱ Swing Tempo & Acceleration', fontsize=11, fontweight='bold', loc='left')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left', fontsize=9)
+        
+        # Calculate tempo stats
+        if self.impact_idx is not None and hasattr(self, 'address_idx'):
+            if hasattr(self, 'top_idx') and self.top_idx is not None:
+                # Show backswing and downswing timing
+                backswing_samples = self.top_idx - self.address_idx
+                downswing_samples = self.impact_idx - self.top_idx
+                original_backswing = backswing_samples / self.interp_factor
+                original_downswing = downswing_samples / self.interp_factor
+                backswing_sec = original_backswing * 0.01
+                downswing_sec = original_downswing * 0.01
+                tempo_ratio = backswing_sec / downswing_sec if downswing_sec > 0 else 0
+                tempo_text = f'Backswing: {backswing_sec:.2f}s\nDownswing: {downswing_sec:.2f}s\nRatio: {tempo_ratio:.2f}:1'
+            else:
+                # Fallback to full swing timing
+                backswing_samples = self.impact_idx - self.address_idx
+                original_backswing = backswing_samples / self.interp_factor
+                tempo_sec = original_backswing * 0.01
+                tempo_text = f'Swing: {original_backswing:.0f} samples\n({tempo_sec:.2f}s @ 100Hz)'
+            
+            ax.text(0.98, 0.98, tempo_text, transform=ax.transAxes, fontsize=9,
+                   verticalalignment='top', horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    
+    def plot_summary_metrics(self, ax, start_idx=None, end_idx=None):
+        """Display text summary of key metrics"""
+        ax.axis('off')
+        
+        if start_idx is None:
+            start_idx = 0
+        if end_idx is None:
+            end_idx = len(self.velocities) - 1
+        
+        velocities_mph = self.velocities[start_idx:end_idx+1] * self.rad_to_mph
+        
+        # Build summary text - compact format
+        summary = "=" * 90 + "\n"
+        summary += "📊 SWING ANALYSIS SUMMARY - IMU RELIABLE METRICS\n"
+        summary += "=" * 90 + "\n"
+        
+        # Speed metrics (RELIABLE)
+        summary += "⚡ SPEED: "
+        summary += f"Peak {np.max(velocities_mph):.1f} mph | Avg {np.mean(velocities_mph):.1f} mph"
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            impact_speed = velocities_mph[self.impact_idx - start_idx]
+            summary += f" | Impact {impact_speed:.1f} mph (#{self.impact_idx})"
+        summary += "\n"
+        
+        # Face angle metrics (RELIABLE)
+        face_angles = self.face_angles[start_idx:end_idx+1]
+        summary += "🎯 FACE: "
+        if self.impact_idx is not None and start_idx <= self.impact_idx <= end_idx:
+            impact_angle = face_angles[self.impact_idx - start_idx]
+            if abs(impact_angle) < 2:
+                face_status = "Square ✓"
+            elif abs(impact_angle) < 5:
+                face_status = "Nearly Square"
+            elif impact_angle > 0:
+                face_status = "Closed (left)"
+            else:
+                face_status = "Open (right)"
+            summary += f"Impact {impact_angle:+.1f}° ({face_status}) | "
+        summary += f"Range {np.min(face_angles):.1f}° to {np.max(face_angles):.1f}°\n"
+        
+        # Tempo (RELIABLE)
+        summary += "⏱ TIMING: "
+        original_total = (end_idx - start_idx + 1) / self.interp_factor
+        summary += f"Total {original_total:.0f} samples"
+        if self.impact_idx is not None and hasattr(self, 'address_idx'):
+            if hasattr(self, 'top_idx') and self.top_idx is not None:
+                # Show backswing and downswing separately
+                backswing = self.top_idx - self.address_idx
+                downswing = self.impact_idx - self.top_idx
+                original_backswing = backswing / self.interp_factor
+                original_downswing = downswing / self.interp_factor
+                backswing_sec = original_backswing * 0.01
+                downswing_sec = original_downswing * 0.01
+                tempo_ratio = backswing_sec / downswing_sec if downswing_sec > 0 else 0
+                summary += f" | Back {backswing_sec:.2f}s : Down {downswing_sec:.2f}s (Ratio {tempo_ratio:.2f}:1)"
+            else:
+                # Fallback to full swing time if top not detected
+                backswing = self.impact_idx - self.address_idx
+                original_backswing = backswing / self.interp_factor
+                summary += f" | Swing {original_backswing * 0.01:.2f}s"
+        summary += "\n"
+        
+        # Position warning (NOT RELIABLE)
+        summary += "\n⚠️  POSITION TRACKING: Not Reliable from IMU alone\n"
+        summary += "    IMU measures orientation only. 3D position requires external tracking (optical/radar).\n"
+        
+        # Display text - smaller font, more compact
+        ax.text(0.01, -0.10, summary, transform=ax.transAxes, fontsize=8.5,
+               verticalalignment='bottom', horizontalalignment='left',
+               family='monospace',
+               bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.9, 
+                        edgecolor='darkblue', linewidth=2))
 
 
 # Test function

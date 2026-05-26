@@ -197,7 +197,7 @@ class GolfSwingAnalyzer:
         self.current_filename = None  # Track the current data filename
         
         # Circular buffer for continuous streaming
-        self.buffer_size = 200  # Configurable pre/post impact points
+        self.buffer_size = 150  # Configurable pre/post impact points (150 samples = 1.5s at 100Hz, total 3s swing)
         self.stream_buffer = deque(maxlen=self.buffer_size)
         self.impact_detected = False
         self.pre_impact_data = []
@@ -279,7 +279,7 @@ class GolfSwingAnalyzer:
         
         # Capture Controls
         ttk.Label(control_frame, text="Buffer Size:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        self.buffer_size_var = tk.IntVar(value=200)
+        self.buffer_size_var = tk.IntVar(value=150)
         buffer_size_spinbox = ttk.Spinbox(
             control_frame,
             from_=50,
@@ -399,7 +399,7 @@ class GolfSwingAnalyzer:
         summary_frame = ttk.LabelFrame(self.root, text="Data Summary", padding=10)
         summary_frame.pack(fill="x", padx=10, pady=5)
         
-        self.data_count_label = ttk.Label(summary_frame, text="Buffer: 0/200 | State: STREAMING")
+        self.data_count_label = ttk.Label(summary_frame, text="Buffer: 0/150 | State: STREAMING")
         self.data_count_label.pack(side="left", padx=10)
         
         self.connection_label = ttk.Label(summary_frame, text="Status: Not Connected", foreground="red")
