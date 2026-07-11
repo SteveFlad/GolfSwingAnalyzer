@@ -62,7 +62,7 @@ class BLECapture:
         self.total_received = 0
         self.total_parsed = 0
         self.last_data_time = None
-        self.data_timeout = 10.0  # seconds - increased to handle startup delays
+        self.data_timeout = 30.0  # seconds - increased for BLE connection stability
         
         # Latest data storage for calibration
         self.latest_raw_data = None
@@ -145,30 +145,64 @@ class BLECapture:
                 print(f"Connecting to BLE device {self.device_address}...")
                 self.client = BleakClient(self.device_address, timeout=20.0)
                 await self.client.connect(timeout=20.0)
+                print("BLE physical connection established")
                 
-                # Give device time to stabilize
-                await asyncio.sleep(0.5)
+                # Give device time to stabilize and complete service discovery
+                print("Waiting for GATT service discovery...")
+                await asyncio.sleep(1.5)
                 
                 # Verify service and characteristic exist
-                services = self.client.services
-                service_found = False
-                char_found = False
-                
-                for service in services:
-                    if service.uuid.lower() == self.SERVICE_UUID.lower():
-                        service_found = True
-                        for char in service.characteristics:
-                            if char.uuid.lower() == self.CHARACTERISTIC_UUID.lower():
-                                char_found = True
-                                break
-                        break
-                
-                if not service_found or not char_found:
+                print("Enumerating GATT services...")
+                try:
+                    services = self.client.services
+                    print(f"Found {len(services)} GATT services")
+                    
+                    # Debug: List all services
+                    for service in services:
+                        print(f"  Service: {service.uuid}")
+                    
+                    service_found = False
+                    char_found = False
+                    
+                    # Normalize UUIDs for comparison (remove dashes, lowercase)
+                    target_service_uuid = self.SERVICE_UUID.lower().replace('-', '')
+                    target_char_uuid = self.CHARACTERISTIC_UUID.lower().replace('-', '')
+                    
+                    for service in services:
+                        service_uuid_norm = service.uuid.lower().replace('-', '')
+                        if service_uuid_norm == target_service_uuid:
+                            service_found = True
+                            print(f"✓ Found GolfSwingAnalyzer service: {service.uuid}")
+                            for char in service.characteristics:
+                                char_uuid_norm = char.uuid.lower().replace('-', '')
+                                print(f"    Characteristic: {char.uuid}")
+                                if char_uuid_norm == target_char_uuid:
+                                    char_found = True
+                                    print(f"    ✓ Found quaternion data characteristic")
+                                    break
+                            break
+                    
+                    if not service_found:
+                        print(f"ERROR: Service {self.SERVICE_UUID} not found on device")
+                    if not char_found:
+                        print(f"ERROR: Characteristic {self.CHARACTERISTIC_UUID} not found")
+                    
+                    if not service_found or not char_found:
+                        await self.client.disconnect()
+                        print(f"ERROR: Device doesn't have required BLE service/characteristic")
+                        if self.connection_lost_callback:
+                            self.connection_lost_callback("BLE service/characteristic not found")
+                        return
+                        
+                except Exception as e:
+                    print(f"ERROR: Failed to enumerate GATT services: {e}")
+                    print(f"HINT: On Windows, you may need to pair the device first:")
+                    print(f"  1. Go to Settings > Bluetooth & devices")
+                    print(f"  2. Click 'Add device' > Bluetooth")
+                    print(f"  3. Wait for 'GolfSwingAnalyzer' to appear and click it")
+                    print(f"  4. After pairing, try connecting again")
                     await self.client.disconnect()
-                    print(f"ERROR: Device doesn't have required BLE service/characteristic")
-                    if self.connection_lost_callback:
-                        self.connection_lost_callback("BLE service/characteristic not found")
-                    return
+                    raise
                 
                 # Subscribe to notifications
                 await self.client.start_notify(self.CHARACTERISTIC_UUID, self._notification_handler)
@@ -177,15 +211,24 @@ class BLECapture:
                 self.last_data_time = time.time()  # Set initial time to avoid immediate timeout
                 
                 # Keep connection alive and monitor timeout
-                while self.is_running and self.client.is_connected:
-                    await asyncio.sleep(0.5)
+                connection_check_interval = 2.0  # Check every 2 seconds
+                while self.is_running:
+                    await asyncio.sleep(connection_check_interval)
                     
-                    # Check for data timeout
+                    # Check if still connected
+                    if not self.client.is_connected:
+                        print("BLE connection lost - client disconnected")
+                        break
+                    
+                    # Check for data timeout (only if we've received data before)
                     if self.last_data_time:
                         time_since_data = time.time() - self.last_data_time
                         if time_since_data > self.data_timeout:
-                            print(f"BLE data timeout ({time_since_data:.1f}s)")
+                            print(f"BLE data timeout ({time_since_data:.1f}s since last data)")
                             break
+                        # Log occasional heartbeat
+                        if int(time_since_data) % 10 == 0 and int(time_since_data) > 0:
+                            print(f"BLE connection stable: {time_since_data:.0f}s, {self.total_received} packets received")
                 
                 # Disconnect
                 if self.client.is_connected:
@@ -196,6 +239,19 @@ class BLECapture:
                 
             except Exception as e:
                 print(f"BLE connection attempt {attempt + 1} failed: {e}")
+                
+                # Provide helpful hints based on error type
+                error_str = str(e).lower()
+                if "unreachable" in error_str:
+                    print("HINT: 'Unreachable' error often means:")
+                    print("  - Device needs to be paired in Windows Settings > Bluetooth")
+                    print("  - Bluetooth adapter power management is interfering")
+                    print("  - Another program is connected to the device")
+                elif "timeout" in error_str:
+                    print("HINT: Connection timeout - device may be too far or has interference")
+                elif "not found" in error_str:
+                    print("HINT: Device not found - ensure it's powered on and advertising")
+                
                 if self.client:
                     try:
                         await self.client.disconnect()
@@ -218,9 +274,9 @@ class BLECapture:
             self.total_received += 1
             self.last_data_time = time.time()
             
-            # Debug: Log first few messages
-            if self.total_received <= 3:
-                print(f"[BLE DEBUG] Received notification #{self.total_received}: {message[:50]}")
+            # Debug: Log first few messages and periodic updates (same as serial)
+            if self.total_received <= 10 or self.total_received % 50 == 0:
+                print(f"[DEBUG] Received line {self.total_received}: {message}")
             
             # Check for error/status messages from firmware
             if message.startswith("ERROR:"):
