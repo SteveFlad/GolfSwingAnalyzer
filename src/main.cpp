@@ -55,12 +55,14 @@ class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       deviceConnected = true;
       Serial.println("BLE Client Connected!");
+      Serial.println("Using default connection parameters (optimized in advertising)");
     };
 
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
       Serial.println("BLE Client Disconnected");
       // Restart advertising so new clients can connect
+      delay(500); // Give BLE stack time to clean up
       BLEDevice::startAdvertising();
       Serial.println("BLE Advertising restarted");
     }
@@ -169,8 +171,7 @@ void setup() {
   pServer->setCallbacks(new MyServerCallbacks());
   
   // Configure connection parameters for stability
-  // Min interval: 10ms, Max interval: 20ms, Latency: 0, Timeout: 4000ms
-  BLEDevice::setMTU(512);  // Increase MTU for better throughput
+  BLEDevice::setMTU(185);  // Reasonable MTU for stable connection (3 notifications per interval)
   
   // Create BLE Service
   BLEService *pService = pServer->createService(SERVICE_UUID);
@@ -188,12 +189,14 @@ void setup() {
   // Start the service
   pService->start();
   
-  // Start advertising with device name
+  // Start advertising with optimized connection parameters
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);  // Functions that help with iPhone connections
-  pAdvertising->setMinPreferred(0x12);
+  // Set preferred connection intervals (units of 1.25ms)
+  // 0x10 = 20ms min, 0x20 = 40ms max - suitable for 50Hz data rate
+  pAdvertising->setMinPreferred(0x10);  // 20ms minimum interval
+  pAdvertising->setMaxPreferred(0x20);  // 40ms maximum interval
   
   // Add device name to advertising data (this makes it visible in scans)
   BLEAdvertisementData advertisementData;
@@ -361,21 +364,23 @@ void loop() {
     // Send to USB Serial
     Serial.println(buffer);
     
-    // Send to BLE if client is connected
+    // Send to BLE if client is connected (rate limited)
     if (deviceConnected) {
-      pCharacteristic->setValue(buffer);
-      pCharacteristic->notify();
+      // Only send every other sample to stay within BLE connection interval (50Hz instead of 100Hz)
+      if (sampleCount % 2 == 0) {
+        pCharacteristic->setValue(buffer);
+        pCharacteristic->notify();
+        // Small delay after notification to let BLE stack process
+        delay(2);
+      }
       // Blink LED to show BLE activity
-      if (sampleCount % 10 == 0) {
+      if (sampleCount % 20 == 0) {
         digitalWrite(LED_PIN, !digitalRead(LED_PIN));
       }
     } else {
       digitalWrite(LED_PIN, HIGH);  // Solid LED when no BLE client
     }
-    
-    // Small delay to prevent overwhelming BLE stack
-    delayMicroseconds(500);  // 0.5ms delay
   }
   
-  delay(15);  // Slow down slightly to reduce I2C errors (~66Hz)
+  delay(10);  // Target 100Hz sample rate
 }
