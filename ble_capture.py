@@ -11,6 +11,7 @@ import asyncio
 import threading
 import time
 import re
+import platform
 from typing import Optional, Callable
 from dataclasses import dataclass
 
@@ -28,6 +29,7 @@ class BLEDeviceInfo:
     name: str
     address: str
     rssi: int = 0
+    is_target: bool = False
 
 
 class BLECapture:
@@ -91,17 +93,95 @@ class BLECapture:
         if not BLEAK_AVAILABLE:
             return []
         
-        devices = await BleakScanner.discover(timeout=timeout)
         result = []
-        
-        for device in devices:
-            name = device.name or "Unknown"
-            address = device.address
-            rssi = getattr(device, 'rssi', 0)
-            
-            result.append(BLEDeviceInfo(name=name, address=address, rssi=rssi))
-        
+        target_uuid = BLECapture.SERVICE_UUID.lower()
+
+        # Prefer advertisement details when available so unnamed devices can still be identified.
+        try:
+            devices_with_adv = await BleakScanner.discover(timeout=timeout, return_adv=True)
+            for _addr, pair in devices_with_adv.items():
+                device, adv = pair
+                adv_name = getattr(adv, 'local_name', None)
+                name = device.name or adv_name or "Unknown"
+                address = device.address
+                rssi = getattr(device, 'rssi', getattr(adv, 'rssi', 0))
+                service_uuids = [u.lower() for u in (getattr(adv, 'service_uuids', None) or [])]
+                is_target = (target_uuid in service_uuids) or ("golfswinganalyzer" in name.lower())
+
+                result.append(BLEDeviceInfo(name=name, address=address, rssi=rssi, is_target=is_target))
+        except TypeError:
+            # Fallback for older bleak versions without return_adv support.
+            devices = await BleakScanner.discover(timeout=timeout)
+            for device in devices:
+                name = device.name or "Unknown"
+                address = device.address
+                rssi = getattr(device, 'rssi', 0)
+                is_target = "golfswinganalyzer" in name.lower()
+                result.append(BLEDeviceInfo(name=name, address=address, rssi=rssi, is_target=is_target))
+
+        # Show likely target devices first, then strongest signals.
+        if not any(d.is_target for d in result):
+            # Windows sometimes hides service UUIDs in advertisements.
+            # Probe all discovered devices to detect the GolfSwingAnalyzer service.
+            probe_count = len(result)
+            for idx in range(probe_count):
+                device = result[idx]
+                try:
+                    if await BLECapture._device_has_target_service(device.address, timeout=3.0):
+                        result[idx].is_target = True
+                        if result[idx].name == "Unknown":
+                            result[idx].name = "GolfSwingAnalyzer?"
+                except Exception:
+                    # Ignore probe failures and continue checking other devices.
+                    pass
+
+        result.sort(key=lambda d: (d.is_target, d.rssi), reverse=True)
         return result
+
+    @staticmethod
+    async def _device_has_target_service(address: str, timeout: float = 4.0) -> bool:
+        """Quickly probe a device for the expected GolfSwingAnalyzer service UUID."""
+        client_kwargs = {"timeout": timeout}
+        device_ref = address
+        if platform.system() == "Windows":
+            client_kwargs["winrt"] = {"use_cached_services": False}
+            try:
+                resolved = await BleakScanner.find_device_by_address(address, timeout=max(2.0, timeout))
+                if resolved is not None:
+                    device_ref = resolved
+            except Exception:
+                # Fall back to raw address if resolution fails.
+                pass
+
+        client = BleakClient(device_ref, **client_kwargs)
+        try:
+            await client.connect(timeout=timeout)
+
+            if hasattr(client, 'get_services'):
+                services_obj = await client.get_services()
+            else:
+                services_obj = getattr(client, 'services', None)
+
+            if not services_obj:
+                return False
+
+            if hasattr(services_obj, 'services') and isinstance(services_obj.services, dict):
+                services = list(services_obj.services.values())
+            else:
+                services = list(services_obj)
+
+            target = BLECapture.SERVICE_UUID.lower().replace('-', '')
+            for svc in services:
+                svc_uuid = getattr(svc, 'uuid', '')
+                if svc_uuid and svc_uuid.lower().replace('-', '') == target:
+                    return True
+            return False
+        finally:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception:
+                pass
     
     def start(self):
         """Start BLE data capture in background thread"""
@@ -130,11 +210,45 @@ class BLECapture:
         finally:
             self.asyncio_loop.close()
             self.asyncio_loop = None
+
+    async def _get_services_with_retry(self, attempts: int = 4, delay_seconds: float = 0.6):
+        """Fetch GATT services with retries for Windows service discovery timing issues."""
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                if hasattr(self.client, 'get_services'):
+                    services_obj = await self.client.get_services()
+                else:
+                    services_obj = getattr(self.client, 'services', None)
+
+                if not services_obj:
+                    raise RuntimeError("No GATT services available yet")
+
+                if hasattr(services_obj, 'services') and isinstance(services_obj.services, dict):
+                    services = list(services_obj.services.values())
+                else:
+                    services = list(services_obj)
+
+                if services:
+                    return services
+                raise RuntimeError("No GATT services discovered")
+            except Exception as e:
+                last_error = e
+                print(f"Service discovery attempt {attempt}/{attempts} failed: {e}")
+
+            if attempt < attempts:
+                await asyncio.sleep(delay_seconds)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("No GATT services discovered")
     
     async def _connect_and_read(self):
         """Connect to device and start reading data"""
         max_retries = 3
         retry_delay = 2
+        last_error = None
+        connected_once = False
         
         for attempt in range(max_retries):
             try:
@@ -143,7 +257,22 @@ class BLECapture:
                     await asyncio.sleep(retry_delay)
                 
                 print(f"Connecting to BLE device {self.device_address}...")
-                self.client = BleakClient(self.device_address, timeout=20.0)
+                device_ref = self.device_address
+                client_kwargs = {"timeout": 20.0}
+
+                if platform.system() == "Windows":
+                    # Use a fresh scan result per attempt and bypass stale Windows GATT caches.
+                    resolved = await BleakScanner.find_device_by_address(self.device_address, timeout=8.0)
+                    if resolved is not None:
+                        device_ref = resolved
+                    else:
+                        print(
+                            f"WARNING: Device {self.device_address} not discoverable at connect time; "
+                            "trying direct-address connect"
+                        )
+                    client_kwargs["winrt"] = {"use_cached_services": False}
+
+                self.client = BleakClient(device_ref, **client_kwargs)
                 await self.client.connect(timeout=20.0)
                 print("BLE physical connection established")
                 
@@ -154,7 +283,7 @@ class BLECapture:
                 # Verify service and characteristic exist
                 print("Enumerating GATT services...")
                 try:
-                    services = self.client.services
+                    services = await self._get_services_with_retry()
                     print(f"Found {len(services)} GATT services")
                     
                     # Debug: List all services
@@ -206,6 +335,7 @@ class BLECapture:
                 
                 # Subscribe to notifications
                 await self.client.start_notify(self.CHARACTERISTIC_UUID, self._notification_handler)
+                connected_once = True
                 
                 print("BLE connected - waiting for data...")
                 self.last_data_time = time.time()  # Set initial time to avoid immediate timeout
@@ -238,6 +368,7 @@ class BLECapture:
                 break  # Success, exit retry loop
                 
             except Exception as e:
+                last_error = e
                 print(f"BLE connection attempt {attempt + 1} failed: {e}")
                 
                 # Provide helpful hints based on error type
@@ -261,10 +392,13 @@ class BLECapture:
                 if attempt == max_retries - 1:
                     print(f"BLE connection failed after {max_retries} attempts")
                     if self.connection_lost_callback:
-                        self.connection_lost_callback("BLE connection failed after retries")
+                        if last_error:
+                            self.connection_lost_callback(f"BLE connect error: {last_error}")
+                        else:
+                            self.connection_lost_callback("BLE connection failed after retries")
         
         # Connection lost or stopped
-        if self.connection_lost_callback and self.is_running:
+        if self.connection_lost_callback and self.is_running and connected_once:
             self.connection_lost_callback("BLE connection lost")
     
     def _notification_handler(self, sender, data: bytearray):

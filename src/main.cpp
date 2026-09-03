@@ -16,19 +16,48 @@
 #include <Adafruit_ICM20X.h>
 #include <Adafruit_ICM20948.h>
 #include <Adafruit_Sensor.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <NimBLEDevice.h>
 
 // Create sensor object
 Adafruit_ICM20948 icm;
 
 // BLE Objects
-BLEServer* pServer = nullptr;
-BLECharacteristic* pCharacteristic = nullptr;
+NimBLEServer* pServer = nullptr;
+NimBLECharacteristic* pCharacteristic = nullptr;
+NimBLEAdvertising* pAdvertising = nullptr;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
+unsigned long lastAdvWatchdogMs = 0;
+unsigned long lastBleHeartbeatMs = 0;
+
+bool startAdvertisingWithRetry(const char* context, int attempts = 30, int delayMs = 200) {
+  if (!pAdvertising) {
+    Serial.print("BLE start skipped (");
+    Serial.print(context);
+    Serial.println("): advertiser null");
+    return false;
+  }
+
+  for (int i = 1; i <= attempts; i++) {
+    bool started = NimBLEDevice::startAdvertising();
+    if (started) {
+      Serial.print("BLE advertising start (");
+      Serial.print(context);
+      Serial.print(") attempt ");
+      Serial.print(i);
+      Serial.print("/");
+      Serial.print(attempts);
+      Serial.println(": OK");
+      return true;
+    }
+    delay(delayMs);
+  }
+
+  Serial.print("BLE advertising start (");
+  Serial.print(context);
+  Serial.println("): FAILED");
+  return false;
+}
 
 // BLE UUIDs (match Python ble_capture.py)
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789abc"
@@ -49,24 +78,6 @@ float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
 float beta = 0.5f;  // Filter gain (increased for faster response)
 unsigned long lastUpdate = 0;
 int sampleCount = 0;
-
-// BLE Server Callbacks
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-      Serial.println("BLE Client Connected!");
-      Serial.println("Using default connection parameters (optimized in advertising)");
-    };
-
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-      Serial.println("BLE Client Disconnected");
-      // Restart advertising so new clients can connect
-      delay(500); // Give BLE stack time to clean up
-      BLEDevice::startAdvertising();
-      Serial.println("BLE Advertising restarted");
-    }
-};
 
 void blinkLED(int times, int delayMs = 100) {
   for (int i = 0; i < times; i++) {
@@ -164,50 +175,54 @@ void setup() {
   
   // Initialize BLE
   Serial.println("Initializing BLE...");
-  BLEDevice::init(DEVICE_NAME);
+  NimBLEDevice::init(DEVICE_NAME);
+  NimBLEDevice::setDeviceName(DEVICE_NAME);
+  NimBLEDevice::setPower(9);
   
   // Create BLE Server
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
+  pServer = NimBLEDevice::createServer();
   
   // Configure connection parameters for stability
-  BLEDevice::setMTU(185);  // Reasonable MTU for stable connection (3 notifications per interval)
+  NimBLEDevice::setMTU(185);  // Reasonable MTU for stable connection (3 notifications per interval)
   
   // Create BLE Service
-  BLEService *pService = pServer->createService(SERVICE_UUID);
+  NimBLEService *pService = pServer->createService(SERVICE_UUID);
   
   // Create BLE Characteristic
   pCharacteristic = pService->createCharacteristic(
                       CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_READ |
-                      BLECharacteristic::PROPERTY_NOTIFY
+                      NIMBLE_PROPERTY::READ |
+                      NIMBLE_PROPERTY::NOTIFY
                     );
   
-  // Add Client Characteristic Configuration Descriptor (required for notifications)
-  pCharacteristic->addDescriptor(new BLE2902());
-  
-  // Start the service
-  pService->start();
-  
   // Start advertising with optimized connection parameters
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
+  pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->enableScanResponse(true);
+
+  // Configure payload through NimBLEAdvertising helpers to avoid conflicting packet state.
+  pAdvertising->clearData();
+  bool nameSetOk = pAdvertising->setName(DEVICE_NAME);
+  bool serviceSetOk = pAdvertising->addServiceUUID(SERVICE_UUID);
+  bool prefSetOk = pAdvertising->setPreferredParams(0x10, 0x20);
   // Set preferred connection intervals (units of 1.25ms)
   // 0x10 = 20ms min, 0x20 = 40ms max - suitable for 50Hz data rate
-  pAdvertising->setMinPreferred(0x10);  // 20ms minimum interval
-  pAdvertising->setMaxPreferred(0x20);  // 40ms maximum interval
+  pAdvertising->setMinInterval(0x10);  // 20ms minimum interval
+  pAdvertising->setMaxInterval(0x20);  // 40ms maximum interval
+
+  bool advStarted = startAdvertisingWithRetry("setup");
   
-  // Add device name to advertising data (this makes it visible in scans)
-  BLEAdvertisementData advertisementData;
-  advertisementData.setName(DEVICE_NAME);
-  advertisementData.setCompleteServices(BLEUUID(SERVICE_UUID));
-  pAdvertising->setAdvertisementData(advertisementData);
-  
-  BLEDevice::startAdvertising();
-  
+  Serial.print("BLE MAC Address: ");
+  Serial.println(NimBLEDevice::getAddress().toString().c_str());
   Serial.print("BLE Device Name: ");
   Serial.println(DEVICE_NAME);
+  Serial.print("BLE Name payload set: ");
+  Serial.println(nameSetOk ? "OK" : "FAILED");
+  Serial.print("BLE Service UUID set: ");
+  Serial.println(serviceSetOk ? "OK" : "FAILED");
+  Serial.print("BLE Preferred params set: ");
+  Serial.println(prefSetOk ? "OK" : "FAILED");
+  Serial.print("BLE Advertising start: ");
+  Serial.println(advStarted ? "OK" : "FAILED");
   Serial.println("BLE Advertising started - device is discoverable");
   blinkLED(3, 100);
   
@@ -299,13 +314,40 @@ void setup() {
 
 void loop() {
   sensors_event_t accel, gyro, mag, temp;
+
+  // Poll connection count from NimBLE server for robust state tracking.
+  deviceConnected = pServer && (pServer->getConnectedCount() > 0);
+
+  if (millis() - lastBleHeartbeatMs > 10000) {
+    lastBleHeartbeatMs = millis();
+    Serial.print("BLE heartbeat: connected=");
+    Serial.print(deviceConnected ? "1" : "0");
+    Serial.print(" advertising=");
+    Serial.println((pAdvertising && pAdvertising->isAdvertising()) ? "1" : "0");
+  }
+
+  // Watchdog: some hosts can leave advertising halted after failed connection attempts.
+  if (!deviceConnected && pAdvertising && (millis() - lastAdvWatchdogMs > 5000)) {
+    lastAdvWatchdogMs = millis();
+    if (!pAdvertising->isAdvertising()) {
+      bool restarted = startAdvertisingWithRetry("watchdog", 8, 150);
+      Serial.print("BLE advertising watchdog restart: ");
+      Serial.println(restarted ? "OK" : "FAILED");
+    }
+  }
   
   // Handle BLE connection state changes
   if (!deviceConnected && oldDeviceConnected) {
-    delay(500); // Give BLE stack time to prepare
+    Serial.println("BLE Client Disconnected");
+    delay(200); // Give BLE stack time to clean up before re-advertising
+    if (pAdvertising && !pAdvertising->isAdvertising()) {
+      startAdvertisingWithRetry("disconnect", 8, 150);
+      Serial.println("BLE Advertising restarted");
+    }
     oldDeviceConnected = deviceConnected;
   }
   if (deviceConnected && !oldDeviceConnected) {
+    Serial.println("BLE Client Connected!");
     oldDeviceConnected = deviceConnected;
   }
   
