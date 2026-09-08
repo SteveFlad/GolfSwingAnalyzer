@@ -108,6 +108,9 @@ class BLECapture:
                 service_uuids = [u.lower() for u in (getattr(adv, 'service_uuids', None) or [])]
                 is_target = (target_uuid in service_uuids) or ("golfswinganalyzer" in name.lower())
 
+                if is_target and name == "Unknown":
+                    name = "GolfSwingAnalyzer"
+
                 result.append(BLEDeviceInfo(name=name, address=address, rssi=rssi, is_target=is_target))
         except TypeError:
             # Fallback for older bleak versions without return_adv support.

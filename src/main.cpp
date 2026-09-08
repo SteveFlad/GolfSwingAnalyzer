@@ -39,7 +39,11 @@ bool startAdvertisingWithRetry(const char* context, int attempts = 30, int delay
   }
 
   for (int i = 1; i <= attempts; i++) {
-    bool started = NimBLEDevice::startAdvertising();
+    // Prefer the advertising instance start, then fallback to global helper.
+    bool started = pAdvertising->start();
+    if (!started) {
+      started = NimBLEDevice::startAdvertising();
+    }
     if (started) {
       Serial.print("BLE advertising start (");
       Serial.print(context);
@@ -72,6 +76,7 @@ bool startAdvertisingWithRetry(const char* context, int attempts = 30, int delay
 // Configuration
 #define SERIAL_BAUD 115200
 #define SAMPLE_RATE_HZ 100
+static const char* FW_BUILD_TAG = "BLE_FIX_2026_09_06_01";
 
 // Madgwick filter variables
 float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
@@ -168,6 +173,8 @@ void setup() {
   
   Serial.println("========================================");
   Serial.println("Golf Swing Analyzer - ESP32 Firmware");
+  Serial.print("FW Build: ");
+  Serial.println(FW_BUILD_TAG);
   Serial.println("Board: XIAO ESP32S3");
   Serial.println("Sensor: ICM-20948 (Adafruit Library)");
   Serial.println("Mode: USB Serial + BLE GATT");
@@ -199,15 +206,15 @@ void setup() {
   pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->enableScanResponse(true);
 
-  // Configure payload through NimBLEAdvertising helpers to avoid conflicting packet state.
-  pAdvertising->clearData();
-  bool nameSetOk = pAdvertising->setName(DEVICE_NAME);
+  // Keep primary advertisement compact: service UUID only.
+  // Device name remains available via NimBLEDevice::setDeviceName().
+  bool nameSetOk = true;
   bool serviceSetOk = pAdvertising->addServiceUUID(SERVICE_UUID);
   bool prefSetOk = pAdvertising->setPreferredParams(0x10, 0x20);
-  // Set preferred connection intervals (units of 1.25ms)
-  // 0x10 = 20ms min, 0x20 = 40ms max - suitable for 50Hz data rate
-  pAdvertising->setMinInterval(0x10);  // 20ms minimum interval
-  pAdvertising->setMaxInterval(0x20);  // 40ms maximum interval
+  // Set advertising interval (units of 0.625ms). Keep within BLE valid range.
+  // 0x20 = 20ms minimum, 0x40 = 40ms maximum.
+  pAdvertising->setMinInterval(0x20);
+  pAdvertising->setMaxInterval(0x40);
 
   bool advStarted = startAdvertisingWithRetry("setup");
   
@@ -223,7 +230,11 @@ void setup() {
   Serial.println(prefSetOk ? "OK" : "FAILED");
   Serial.print("BLE Advertising start: ");
   Serial.println(advStarted ? "OK" : "FAILED");
-  Serial.println("BLE Advertising started - device is discoverable");
+  if (advStarted) {
+    Serial.println("BLE Advertising started - device is discoverable");
+  } else {
+    Serial.println("BLE Advertising did not start - device is NOT discoverable");
+  }
   blinkLED(3, 100);
   
   // Initialize I2C
@@ -384,6 +395,15 @@ void loop() {
   
   // Debug: Print raw sensor data every 100 samples
   sampleCount++;
+  if (sampleCount % 200 == 0) {
+    Serial.print("[FW ");
+    Serial.print(FW_BUILD_TAG);
+    Serial.print("] BLE connected=");
+    Serial.print(deviceConnected ? "1" : "0");
+    Serial.print(" advertising=");
+    Serial.println((pAdvertising && pAdvertising->isAdvertising()) ? "1" : "0");
+  }
+
   if (sampleCount % 100 == 0) {
     Serial.print("[DEBUG] Accel: ");
     Serial.print(ax, 2); Serial.print(" ");
