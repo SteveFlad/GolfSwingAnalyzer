@@ -562,7 +562,11 @@ class GolfSwingAnalyzer:
         if conn_type == "serial":
             self.refresh_ports()
         else:
-            self.port_combo['values'] = [device[1] + " (" + device[0] + ")" for device in self.bt_devices]
+            self.port_combo['values'] = [
+                f"{device.name} ({device.address}) RSSI:{device.rssi}"
+                + (" [GSA]" if getattr(device, 'is_target', False) else "")
+                for device in self.bt_devices
+            ]
             if not self.bt_devices:
                 self.log_status("Click 'Scan' to discover Bluetooth devices")
     
@@ -598,12 +602,20 @@ class GolfSwingAnalyzer:
         def scan_thread():
             try:
                 devices = scan_ble_devices_sync(timeout=5.0)
-                self.bt_devices = [(d.address, d.name) for d in devices]
-                device_list = [d.name + " (" + d.address + ")" for d in devices]
+                self.bt_devices = devices
+                device_list = [
+                    f"{d.name} ({d.address}) RSSI:{d.rssi}" + (" [GSA]" if getattr(d, 'is_target', False) else "")
+                    for d in devices
+                ]
                 self.root.after(0, lambda: self.port_combo.config(values=device_list))
                 if device_list:
                     self.root.after(0, lambda: self.port_combo.current(0))
                 self.root.after(0, lambda: self.log_status(f"Found {len(devices)} BLE device(s)"))
+                target_count = sum(1 for d in devices if getattr(d, 'is_target', False))
+                if target_count:
+                    self.root.after(0, lambda: self.log_status(f"Detected {target_count} likely GolfSwingAnalyzer device(s) [GSA] - select one of these first"))
+                else:
+                    self.root.after(0, lambda: self.log_status("No [GSA] device detected; try power-cycling ESP32 and rescanning"))
             except Exception as e:
                 self.root.after(0, lambda: self.log_status(f"BLE scan error: {e}"))
                 self.root.after(0, lambda: messagebox.showerror("BLE Error", 
@@ -682,15 +694,16 @@ class GolfSwingAnalyzer:
             
             self.bluetooth_capture = BLECapture(
                 device_address=device_addr,
-                data_callback=self.on_data_received,
+                data_callback=self.on_bluetooth_data_received,
                 connection_lost_callback=self.on_connection_lost
             )
+            self._ble_streaming_confirmed = False
             self.bluetooth_capture.start()
             self.filtered_prev_quat = None
             self.connection_type = "bluetooth"
-            self.connection_label.config(text=f"Status: Connected via BLE", foreground="green")
+            self.connection_label.config(text="Status: Connecting via BLE...", foreground="orange")
             self.connect_btn.config(text="Disconnect")
-            self.log_status(f"Connected to {device_addr} via BLE")
+            self.log_status(f"Connecting to {device_addr} via BLE...")
             self.start_monitoring()
         except Exception as e:
             messagebox.showerror("BLE Error", str(e))
@@ -715,6 +728,7 @@ class GolfSwingAnalyzer:
         if self.bluetooth_capture:
             self.bluetooth_capture.stop()
             self.bluetooth_capture = None
+            self._ble_streaming_confirmed = False
             self.filtered_prev_quat = None
             self.connection_type = None
             self.connection_label.config(text="Status: Not Connected", foreground="red")
@@ -897,6 +911,10 @@ class GolfSwingAnalyzer:
     def clear_data(self):
         """Legacy method - now calls clear_buffer"""
         self.clear_buffer()
+
+    def on_bluetooth_data_received(self, data):
+        """Handle BLE callback on tkinter main thread for safe UI updates"""
+        self.root.after(0, lambda d=data: self.on_data_received(d))
         
     def on_data_received(self, data):
         """Callback when new data is received from serial or BLE
@@ -951,8 +969,16 @@ class GolfSwingAnalyzer:
                 pass  # Ignore calibration errors
 
         # Log periodically to show data is coming in
+        if self.connection_type == "bluetooth" and not getattr(self, "_ble_streaming_confirmed", False):
+            self._ble_streaming_confirmed = True
+            self.connection_label.config(text="Status: Connected via BLE (Streaming)", foreground="green")
+            self.log_status("BLE stream active")
+
         if self._data_received_count % 20 == 1:
-            self.log_status(f"Streaming: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f} | State: {self.capture_state}")
+            transport_tag = "BLE" if self.connection_type == "bluetooth" else "USB"
+            self.log_status(
+                f"Streaming [{transport_tag}]: Q0:{q0:.3f} Q1:{q1:.3f} Q2:{q2:.3f} Q3:{q3:.3f} | State: {self.capture_state}"
+            )
         
         # NEW BUFFER-BASED CAPTURE SYSTEM
         current_quat = (q0, q1, q2, q3)
@@ -1027,6 +1053,7 @@ class GolfSwingAnalyzer:
     
     def _handle_connection_lost(self, reason):
         """Handle connection lost in main thread"""
+        self._ble_streaming_confirmed = False
         self.log_status(f"CONNECTION LOST: {reason}")
         self.connection_label.config(text="Status: Connection Lost", foreground="orange")
         self.clear_buffer()  # Clear buffer on connection lost
