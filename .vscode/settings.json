@@ -1,13 +1,6 @@
 {
     "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
     "python.terminal.activateEnvironment": true,
-    "python-envs.pythonProjects": [
-        {
-            "path": ".",
-            "envManager": "ms-python.python:venv",
-            "packageManager": "ms-python.python:pip"
-        }
-    ],
     "isort.check": false,
     "isort.severity": {
         "W": "Hint",
@@ -21,5 +14,6 @@
         "editor.defaultFormatter": "ms-python.python"
     },
     "python.dataScience.sendSelectionToInteractiveWindow": false,
-    "jupyter.alwaysTrustNotebooks": true
+    "jupyter.alwaysTrustNotebooks": true,
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }
