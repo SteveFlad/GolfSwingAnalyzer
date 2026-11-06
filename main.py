@@ -24,14 +24,17 @@ from serial_capture import SerialCapture
 
 try:
     from ble_capture import BLEAK_AVAILABLE, BLECapture, scan_ble_devices_sync
-
-    BLUETOOTH_AVAILABLE = BLEAK_AVAILABLE
-    BLUETOOTH_TYPE = "BLE (Bluetooth Low Energy)" if BLEAK_AVAILABLE else None
 except ImportError:
-    BLUETOOTH_AVAILABLE = False
-    BLECapture = None
-    scan_ble_devices_sync = None
-    BLUETOOTH_TYPE = None
+    try:
+        # Backward-compatible fallback: some builds still have the BLE module under this name.
+        from test_ble_capture import BLEAK_AVAILABLE, BLECapture, scan_ble_devices_sync
+    except ImportError:
+        BLEAK_AVAILABLE = False
+        BLECapture = None
+        scan_ble_devices_sync = None
+
+BLUETOOTH_AVAILABLE = BLEAK_AVAILABLE
+BLUETOOTH_TYPE = "BLE (Bluetooth Low Energy)" if BLEAK_AVAILABLE else None
 
 
 class VisualizationFilterDialog:
@@ -216,6 +219,7 @@ class GolfSwingAnalyzer:
         
         self.monitor_thread = None
         self.monitoring = False
+        self.ble_scan_in_progress = False
         self.bt_devices = []
         self.settings_file = 'app_settings.json'
         self._save_settings_after_id = None
@@ -562,13 +566,23 @@ class GolfSwingAnalyzer:
         if conn_type == "serial":
             self.refresh_ports()
         else:
+            self.port_var.set("")
             self.port_combo['values'] = [
                 f"{device.name} ({device.address}) RSSI:{device.rssi}"
                 + (" [GSA]" if getattr(device, 'is_target', False) else "")
                 for device in self.bt_devices
             ]
+            if not BLUETOOTH_AVAILABLE:
+                self.log_status("Bluetooth selected, but BLE backend is unavailable. Install bleak and restart the app.")
+                return
             if not self.bt_devices:
-                self.log_status("Click 'Scan' to discover Bluetooth devices")
+                if not self.ble_scan_in_progress:
+                    self.log_status("Bluetooth selected. Scanning for BLE devices...")
+                    self.scan_bluetooth()
+                else:
+                    self.log_status("Bluetooth scan already in progress...")
+            elif self.port_combo['values']:
+                self.port_combo.current(0)
     
     def scan_devices(self):
         """Scan for available devices based on connection type"""
@@ -596,7 +610,21 @@ class GolfSwingAnalyzer:
                 "Install with: pip install bleak\n\n" +
                 "See README_BLUETOOTH.md for details.")
             return
+        if scan_ble_devices_sync is None:
+            messagebox.showerror(
+                "Bluetooth Module Error",
+                "BLE scan function not found.\n\n"
+                "Expected module: ble_capture.py\n"
+                "Fallback module: test_ble_capture.py\n\n"
+                "Please verify project files and restart the app."
+            )
+            self.log_status("BLE scan unavailable: missing scan_ble_devices_sync")
+            return
+        if self.ble_scan_in_progress:
+            self.log_status("BLE scan already in progress...")
+            return
         
+        self.ble_scan_in_progress = True
         self.log_status(f"Scanning for BLE devices using {BLUETOOTH_TYPE}...")
         
         def scan_thread():
@@ -620,6 +648,8 @@ class GolfSwingAnalyzer:
                 self.root.after(0, lambda: self.log_status(f"BLE scan error: {e}"))
                 self.root.after(0, lambda: messagebox.showerror("BLE Error", 
                     f"Failed to scan for BLE devices.\n\n{e}"))
+            finally:
+                self.root.after(0, lambda: setattr(self, "ble_scan_in_progress", False))
         
         threading.Thread(target=scan_thread, daemon=True).start()
         

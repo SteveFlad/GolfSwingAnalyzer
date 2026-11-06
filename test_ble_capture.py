@@ -187,7 +187,30 @@ class BLECapture:
         self.parser_thread.start()
         self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
         self.watchdog_thread.start()
-        self.asyncio_loop = asyncio.get_running_loop()
+        self.asyncio_thread = threading.Thread(target=self._run_asyncio_loop, daemon=True)
+        self.asyncio_thread.start()
+
+    def _run_asyncio_loop(self):
+        self.asyncio_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.asyncio_loop)
+        try:
+            self.asyncio_loop.run_until_complete(self._connect_and_read())
+        except Exception as exc:
+            print(f"[BLE DIAG] asyncio loop error: {exc}")
+        finally:
+            try:
+                pending = asyncio.all_tasks(loop=self.asyncio_loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self.asyncio_loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+                self.asyncio_loop.run_until_complete(self.asyncio_loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            finally:
+                self.asyncio_loop.close()
 
     def _queue_message(self, message: str):
         if not self.is_running:
@@ -478,6 +501,12 @@ class BLECapture:
 
     def stop(self):
         self.is_running = False
+        if self.asyncio_loop and self.asyncio_loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._disconnect_client(), self.asyncio_loop)
+                future.result(timeout=2.0)
+            except Exception:
+                pass
         if self.parser_thread:
             self.parser_thread.join(timeout=2.0)
         if self.watchdog_thread:
@@ -524,6 +553,17 @@ class BLECapture:
 
     def get_latest_raw_data(self):
         return self.latest_raw_data
+
+    async def _disconnect_client(self):
+        if self.client and self.client.is_connected:
+            try:
+                await self.client.stop_notify(self.CHARACTERISTIC_UUID)
+            except Exception:
+                pass
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
 
 
 # Synchronous wrapper for device scanning
