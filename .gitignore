@@ -1,8 +1,17 @@
-.pio
+# PlatformIO build output
+.pio/
+.piolibdeps/
+.pioenvs/
+.platformio/
+compile_commands.json
+esp32_flash_complete.bin
+partition_table.bin
+
+# VS Code local C/C++ metadata
 .vscode/.browse.c_cpp.db*
 .vscode/c_cpp_properties.json
 .vscode/launch.json
-.vscode/ipch
+.vscode/ipch/
 
 # Local runtime data
 calibration_data.json
@@ -13,9 +22,51 @@ data/ClubHeadData.json
 .venv-new/
 venv/
 env/
-__pycache__/
+ENV/
 
-# Python compiled files
-*.pyc
-*.pyo
-*.pyd
+# Python caches / compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Generated analysis images
+axis_mapping_comparison.png
+impact_detection_analysis.png
+swing_impact_analysis.png
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
